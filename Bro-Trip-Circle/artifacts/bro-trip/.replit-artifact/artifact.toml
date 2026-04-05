@@ -1,0 +1,27 @@
+kind = "mobile"
+previewPath = "/"
+title = "Bro Trip"
+version = "1.0.0"
+id = "artifacts/bro-trip"
+router = "expo-domain"
+
+[[integratedSkills]]
+name = "expo"
+version = "1.0.0"
+
+[[services]]
+ensurePreviewReachable = "/status"
+name = "expo"
+paths = [ "/" ]
+localPort = 22077
+
+[services.development]
+run = "pnpm --filter @workspace/bro-trip run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/bro-trip", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/bro-trip", "run", "serve" ]
+
+[services.env]
+PORT = "22077"
+BASE_PATH = "/"

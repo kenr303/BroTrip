@@ -1,0 +1,20 @@
+uploads = []
+outputs = []
+
+[[generated]]
+id = "myHAcqNwnJEWqTNbAwCkN"
+uri = "file://artifacts/bro-trip/assets/images/icon.png"
+type = "image"
+title = "bro trip app icon"
+
+[[generated]]
+id = "Thg8HrQI7vpNtLdXnpTHk"
+uri = "file://artifacts/bro-trip/assets/images/trip-hero.png"
+type = "image"
+title = "friends trip hero"
+
+[[generated]]
+id = "d7XnszYeDz3r1pZNiPJLm"
+uri = "file://artifacts/bro-trip/assets/images/road-trip.png"
+type = "image"
+title = "road trip landscape"
