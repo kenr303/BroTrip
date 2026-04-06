@@ -4,6 +4,7 @@ import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
   Alert,
   Image,
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -28,6 +29,19 @@ import {
   VerificationQuestion,
 } from "@/context/AppContext";
 import { useColors } from "@/hooks/useColors";
+import {
+  TIMER_SECONDS,
+  applyReentryCode,
+  applyTimeout,
+  applyWrongAnswer,
+  checkAnswer,
+  getRiskLevel,
+  isLocked,
+  loadQuestionUsage,
+  loadRiskState,
+  saveRiskState,
+  selectQuestions,
+} from "@/lib/authRisk";
 
 function uid() {
   return Date.now().toString() + Math.random().toString(36).substr(2, 6);
@@ -383,40 +397,199 @@ export default function CircleDetailScreen() {
   const [gateAnswer, setGateAnswer] = useState("");
   const [gateError, setGateError] = useState("");
 
+
+  // ✅ ADD EVERYTHING BELOW HERE
+
+  const [gateQuestions, setGateQuestions] = useState<VerificationQuestion[]>([]);
+  const [gateIndex, setGateIndex] = useState(0);
+
+  const [gateRiskLevel, setGateRiskLevel] = useState<
+    "low" | "moderate" | "high" | "critical"
+  >("low");
+
+  const [gateTimerSecs, setGateTimerSecs] = useState(0);
+  const [gateTimerExpired, setGateTimerExpired] = useState(false);
+
+  const [gateLocked, setGateLocked] = useState(false);
+  const [gateLockRemainingSecs, setGateLockRemainingSecs] = useState(0);
+
+  const [gateReentryCode, setGateReentryCode] = useState("");
+  const [gateReentryError, setGateReentryError] = useState("");
+  const gateTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const gateLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const startGateTimer = useCallback((secs: number) => {
+    if (gateTimerRef.current) clearInterval(gateTimerRef.current);
+    setGateTimerSecs(secs);
+    setGateTimerExpired(false);
+
+    if (secs <= 0) return;
+
+    gateTimerRef.current = setInterval(() => {
+      setGateTimerSecs((prev) => {
+        if (prev <= 1) {
+          if (gateTimerRef.current) clearInterval(gateTimerRef.current);
+          setGateTimerExpired(true);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+  }, []);
+
+  const startGateLockTimer = useCallback((until: string) => {
+    if (gateLockTimerRef.current) clearInterval(gateLockTimerRef.current);
+
+    const update = () => {
+      const remain = Math.max(
+        0,
+        Math.ceil((new Date(until).getTime() - Date.now()) / 1000)
+      );
+      setGateLockRemainingSecs(remain);
+      if (remain <= 0 && gateLockTimerRef.current) {
+        clearInterval(gateLockTimerRef.current);
+      }
+    };
+
+    update();
+    gateLockTimerRef.current = setInterval(update, 1000);
+  }, []);
+
+  const beginGateVerification = useCallback(
+    async (circleArg: typeof circle, errorMessage?: string) => {
+      if (!circleArg || !currentUser) return;
+
+      const state = await loadRiskState(currentUser.id, circleArg.id);
+
+      if (isLocked(state)) {
+        setGateLocked(true);
+        setGateError("");
+        if (state.lockedUntil) startGateLockTimer(state.lockedUntil);
+        return;
+      }
+
+      const level = getRiskLevel(state);
+      setGateRiskLevel(level);
+
+      const usage = await loadQuestionUsage(circleArg.id);
+      const selected = selectQuestions(circleArg.questions, usage, level);
+
+      if (!selected.length) {
+        setVerified(true);
+        return;
+      }
+
+      setGateQuestions(selected);
+      setGateIndex(0);
+      setGateQ(selected[0]);
+      setGateAnswer("");
+      setGateError(errorMessage || "");
+      setGateLocked(false);
+      startGateTimer(TIMER_SECONDS[level]);
+    },
+    [currentUser, startGateLockTimer, startGateTimer]
+  );
+
+  const handleGateReentrySubmit = async () => {
+    if (!circle || !currentUser) return;
+
+    const state = await loadRiskState(currentUser.id, circle.id);
+    const { success, state: next } = applyReentryCode(state, gateReentryCode);
+
+    if (!success) {
+      setGateReentryError("Invalid or expired code.");
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      return;
+    }
+
+    await saveRiskState(currentUser.id, circle.id, next);
+
+    setGateReentryError("");
+    setGateReentryCode("");
+    setGateLocked(false);
+
+    if (gateLockTimerRef.current) clearInterval(gateLockTimerRef.current);
+
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    await beginGateVerification(circle);
+  };
   // Keep a fresh ref to circles so the focus callback never has stale data
   const circlesRef = useRef(circles);
-  useEffect(() => { circlesRef.current = circles; }, [circles]);
+  useEffect(() => {
+    if (!gateTimerExpired || !circle || !currentUser) return;
+
+    (async () => {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+
+      let state = await loadRiskState(currentUser.id, circle.id);
+      state = applyTimeout(state);
+      await saveRiskState(currentUser.id, circle.id, state);
+
+      if (isLocked(state)) {
+        setGateLocked(true);
+        setGateError("");
+        if (state.lockedUntil) startGateLockTimer(state.lockedUntil);
+      } else {
+        await beginGateVerification(circle, "Time's up! Try again.");
+      }
+    })();
+  }, [gateTimerExpired, circle, currentUser, beginGateVerification, startGateLockTimer]);
 
   useFocusEffect(
     useCallback(() => {
       const c = circlesRef.current.find((c) => c.id === id);
-      if (!c || c.questions.length === 0) {
-        // No questions defined — skip gate
-        setVerified(true);
-        return;
-      }
-      // Pick a fresh random question on every entry
-      const q = c.questions[Math.floor(Math.random() * c.questions.length)];
-      setGateQ(q);
+      if (!c) return;
+
       setVerified(false);
       setGateAnswer("");
       setGateError("");
-    }, [id])
+      setGateLocked(false);
+      setGateReentryCode("");
+      setGateReentryError("");
+
+      beginGateVerification(c);
+
+      return () => {
+        if (gateTimerRef.current) clearInterval(gateTimerRef.current);
+        if (gateLockTimerRef.current) clearInterval(gateLockTimerRef.current);
+      };
+    }, [id, beginGateVerification])
   );
 
-  const handleGateSubmit = () => {
-    if (!gateQ) return;
-    const norm = gateAnswer.trim().toLowerCase();
-    if (!norm) { setGateError("Please type your answer."); return; }
-    const ok = gateQ.answers.some((a) => a.toLowerCase() === norm);
-    if (ok) {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setVerified(true);
-    } else {
+  const handleGateSubmit = async () => {
+    if (!circle || !currentUser || !gateQ) return;
+
+    if (gateTimerRef.current) clearInterval(gateTimerRef.current);
+
+    const input = gateAnswer ?? "";
+    const state = await loadRiskState(currentUser.id, circle.id);
+    const correct = checkAnswer(input, gateQ.answers);
+
+    if (!correct) {
+      const next = applyWrongAnswer(state);
+      await saveRiskState(currentUser.id, circle.id, next);
+
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      setGateError("That's not right. Try another answer, or ask a bro for a hint.");
-      setGateAnswer("");
+
+      if (isLocked(next)) {
+        setGateLocked(true);
+        setGateError("");
+        if (next.lockedUntil) startGateLockTimer(next.lockedUntil);
+        return;
+      }
+
+      await beginGateVerification(
+        circle,
+        next.consecutiveFailures >= 3
+          ? `Wrong. ${Math.max(0, 5 - next.consecutiveFailures)} attempt${5 - next.consecutiveFailures === 1 ? "" : "s"
+          } left.`
+          : "Wrong answer. Try again."
+      );
+      return;
     }
+
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setVerified(true);
   };
   // ─────────────────────────────────────────────────────────────────────────────
 
@@ -448,6 +621,7 @@ export default function CircleDetailScreen() {
   const [showAddQ, setShowAddQ] = useState(false);
   const [newQ, setNewQ] = useState("");
   const [newAnswers, setNewAnswers] = useState("");
+  const [newQDifficulty, setNewQDifficulty] = useState<"easy" | "medium" | "hard">("medium");
   const [editingNickname, setEditingNickname] = useState(false);
   const [newNickname, setNewNickname] = useState("");
 
@@ -466,56 +640,154 @@ export default function CircleDetailScreen() {
 
   // ─── Verification gate screen ────────────────────────────────────────────────
   if (!verified) {
+    const lockMins = Math.floor(gateLockRemainingSecs / 60);
+    const lockSecs = gateLockRemainingSecs % 60;
+
     return (
-      <View style={{ flex: 1, backgroundColor: colors.navy }}>
-        <View style={[styles.gateSafeTop, { paddingTop: insets.top + 12, paddingBottom: insets.bottom + 20 }]}>
-          {/* back */}
-          <Pressable onPress={() => router.back()} style={styles.gateBack}>
-            <Feather name="arrow-left" size={20} color="#fff" />
-          </Pressable>
+      <KeyboardAvoidingView
+        style={{ flex: 1, backgroundColor: colors.navy }}
+        behavior={Platform.OS === "ios" ? "padding" : "height"}
+        keyboardVerticalOffset={0}
+      >
+        <Pressable style={{ flex: 1 }} onPress={Keyboard.dismiss}>
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={{
+              flexGrow: 1,
+              paddingTop: insets.top + 12,
+              paddingBottom: insets.bottom + 24,
+            }}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
+            showsVerticalScrollIndicator={false}
+          >
+            <View style={styles.gateSafeTop}>
+              <Pressable onPress={() => router.back()} style={styles.gateBack}>
+                <Feather name="arrow-left" size={20} color="#fff" />
+              </Pressable>
 
-          {/* lock icon + circle name */}
-          <View style={styles.gateLockWrap}>
-            <View style={styles.gateLockCircle}>
-              <Feather name="lock" size={28} color="#fff" />
+              <View style={styles.gateLockWrap}>
+                <View style={styles.gateLockCircle}>
+                  <Feather
+                    name={gateLocked ? "alert-triangle" : "lock"}
+                    size={28}
+                    color="#fff"
+                  />
+                </View>
+                <Text style={styles.gateCircleName}>{circle.name}</Text>
+                <Text style={styles.gateSubtitle}>
+                  {gateLocked ? "Access locked" : "Answer to enter"}
+                </Text>
+              </View>
+
+              {gateLocked ? (
+                <>
+                  <View
+                    style={[
+                      styles.gateCard,
+                      {
+                        backgroundColor: "#ffffff0F",
+                        borderColor: "#ffffff20",
+                      },
+                    ]}
+                  >
+                    <Text style={styles.gateQuestionLabel}>Waifu ALERT!!</Text>
+                    <Text style={styles.gateQuestion}>Ask the BIG Bro for code</Text>
+                    {gateLockRemainingSecs > 0 ? (
+                      <Text style={[styles.gateError, { color: "#fff", marginTop: 8 }]}>
+                        Cooldown: {lockMins}:{String(lockSecs).padStart(2, "0")}
+                      </Text>
+                    ) : null}
+                  </View>
+
+                  <View style={styles.gateInputWrap}>
+                    <TextInput
+                      style={[
+                        styles.gateInput,
+                        {
+                          color: "#fff",
+                          borderColor: gateReentryError ? "#FF5C5C" : "#ffffff50",
+                        },
+                      ]}
+                      placeholder="Re-entry code"
+                      placeholderTextColor="#ffffff60"
+                      value={gateReentryCode}
+                      onChangeText={(v) => {
+                        setGateReentryCode(v.toUpperCase());
+                        setGateReentryError("");
+                      }}
+                      autoCapitalize="characters"
+                      returnKeyType="done"
+                      blurOnSubmit={false}
+                      onSubmitEditing={handleGateReentrySubmit}
+                    />
+                    {gateReentryError ? (
+                      <Text style={styles.gateError}>{gateReentryError}</Text>
+                    ) : null}
+                  </View>
+
+                  <Button
+                    label="Unlock Access"
+                    onPress={handleGateReentrySubmit}
+                    size="lg"
+                    style={{ marginHorizontal: 24 }}
+                  />
+                </>
+              ) : (
+                <>
+                  {gateQ ? (
+                    <View
+                      style={[
+                        styles.gateCard,
+                        {
+                          backgroundColor: "#ffffff0F",
+                          borderColor: "#ffffff20",
+                        },
+                      ]}
+                    >
+                      <Text style={styles.gateQuestionLabel}>
+                        Secret question · {gateRiskLevel} risk · {gateTimerSecs}s
+                      </Text>
+                      <Text style={styles.gateQuestion}>{gateQ.question}</Text>
+                    </View>
+                  ) : null}
+
+                  <View style={styles.gateInputWrap}>
+                    <TextInput
+                      style={[
+                        styles.gateInput,
+                        {
+                          color: "#fff",
+                          borderColor: gateError ? "#FF5C5C" : "#ffffff50",
+                        },
+                      ]}
+                      placeholder="Your answer…"
+                      placeholderTextColor="#ffffff60"
+                      value={gateAnswer}
+                      onChangeText={(v) => {
+                        setGateAnswer(v);
+                        setGateError("");
+                      }}
+                      autoCapitalize="none"
+                      returnKeyType="done"
+                      blurOnSubmit={false}
+                      onSubmitEditing={handleGateSubmit}
+                    />
+                    {gateError ? <Text style={styles.gateError}>{gateError}</Text> : null}
+                  </View>
+
+                  <Button
+                    label="Enter Circle"
+                    onPress={handleGateSubmit}
+                    size="lg"
+                    style={{ marginHorizontal: 24 }}
+                  />
+                </>
+              )}
             </View>
-            <Text style={styles.gateCircleName}>{circle.name}</Text>
-            <Text style={styles.gateSubtitle}>Answer to enter</Text>
-          </View>
-
-          {/* question card */}
-          {gateQ ? (
-            <View style={[styles.gateCard, { backgroundColor: "#fff" + "0F", borderColor: "#fff" + "20" }]}>
-              <Text style={styles.gateQuestionLabel}>Secret question</Text>
-              <Text style={styles.gateQuestion}>{gateQ.question}</Text>
-            </View>
-          ) : null}
-
-          {/* answer input */}
-          <View style={styles.gateInputWrap}>
-            <TextInput
-              style={[styles.gateInput, { color: "#fff", borderColor: gateError ? "#FF5C5C" : "#ffffff50" }]}
-              placeholder="Your answer…"
-              placeholderTextColor="#ffffff60"
-              value={gateAnswer}
-              onChangeText={(v) => { setGateAnswer(v); setGateError(""); }}
-              autoCapitalize="none"
-              returnKeyType="done"
-              onSubmitEditing={handleGateSubmit}
-            />
-            {gateError ? (
-              <Text style={styles.gateError}>{gateError}</Text>
-            ) : null}
-          </View>
-
-          <Button
-            label="Enter Circle"
-            onPress={handleGateSubmit}
-            size="lg"
-            style={{ marginHorizontal: 24 }}
-          />
-        </View>
-      </View>
+          </ScrollView>
+        </Pressable>
+      </KeyboardAvoidingView>
     );
   }
   // ─────────────────────────────────────────────────────────────────────────────
@@ -653,22 +925,22 @@ export default function CircleDetailScreen() {
     const timelineEntryId = addForm.postToTimeline ? uid() : undefined;
     const timelineEntry: TimelineEntry | undefined = addForm.postToTimeline && currentUser
       ? (() => {
-          const dayNum = parseInt(addForm.day) || 1;
-          const eventAt = activityDate(circle.startDate, dayNum, addForm.time);
-          return {
-            id: timelineEntryId!,
-            userId: currentUser.id,
-            type: "event" as const,
-            day: dayNum,
-            eventTime: addForm.time || undefined,
-            eventLabel: `Day ${dayNum}, ${addForm.time || "TBD"} – ${title}`,
-            caption: addForm.notes.trim() || title,
-            images: [],
-            reactions: [],
-            comments: [],
-            createdAt: eventAt.toISOString(),
-          };
-        })()
+        const dayNum = parseInt(addForm.day) || 1;
+        const eventAt = activityDate(circle.startDate, dayNum, addForm.time);
+        return {
+          id: timelineEntryId!,
+          userId: currentUser.id,
+          type: "event" as const,
+          day: dayNum,
+          eventTime: addForm.time || undefined,
+          eventLabel: `Day ${dayNum}, ${addForm.time || "TBD"} – ${title}`,
+          caption: addForm.notes.trim() || title,
+          images: [],
+          reactions: [],
+          comments: [],
+          createdAt: eventAt.toISOString(),
+        };
+      })()
       : undefined;
 
     const item: ItineraryItem = {
@@ -793,10 +1065,12 @@ export default function CircleDetailScreen() {
         .map((a) => a.trim().toLowerCase())
         .filter(Boolean),
       addedBy: currentUser?.id || "",
+      difficulty: newQDifficulty,
     };
     await addQuestion(circle.id, q);
     setNewQ("");
     setNewAnswers("");
+    setNewQDifficulty("medium");
     setShowAddQ(false);
   };
 
@@ -840,7 +1114,7 @@ export default function CircleDetailScreen() {
     try {
       await Share.share({ message, title: `Join ${circle.name} on Bro Trip` });
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    } catch (_) {}
+    } catch (_) { }
   };
 
   const topPad = Platform.OS === "web" ? 70 : insets.top;
@@ -1391,28 +1665,28 @@ export default function CircleDetailScreen() {
 
             {showAddItem
               ? renderActivityForm(
-                  addForm,
-                  setAddForm,
-                  handleAddItem,
-                  () => setShowAddItem(false)
-                )
+                addForm,
+                setAddForm,
+                handleAddItem,
+                () => setShowAddItem(false)
+              )
               : editingItemId === null && (
-                  <Pressable
-                    onPress={() => setShowAddItem(true)}
-                    style={[
-                      styles.dashedBtn,
-                      {
-                        borderColor: colors.primary,
-                        borderRadius: colors.radius - 4,
-                      },
-                    ]}
-                  >
-                    <Feather name="plus" size={18} color={colors.primary} />
-                    <Text style={[styles.dashedBtnText, { color: colors.primary }]}>
-                      Add Activity
-                    </Text>
-                  </Pressable>
-                )}
+                <Pressable
+                  onPress={() => setShowAddItem(true)}
+                  style={[
+                    styles.dashedBtn,
+                    {
+                      borderColor: colors.primary,
+                      borderRadius: colors.radius - 4,
+                    },
+                  ]}
+                >
+                  <Feather name="plus" size={18} color={colors.primary} />
+                  <Text style={[styles.dashedBtnText, { color: colors.primary }]}>
+                    Add Activity
+                  </Text>
+                </Pressable>
+              )}
           </View>
         )}
 
@@ -1852,6 +2126,30 @@ export default function CircleDetailScreen() {
                   value={newAnswers}
                   onChangeText={setNewAnswers}
                 />
+                <View>
+                  <Text style={[styles.catLabel, { color: colors.mutedForeground }]}>DIFFICULTY</Text>
+                  <View style={{ flexDirection: "row", gap: 8, marginTop: 6 }}>
+                    {(["easy", "medium", "hard"] as const).map((d) => (
+                      <Pressable
+                        key={d}
+                        onPress={() => setNewQDifficulty(d)}
+                        style={[
+                          styles.catChip,
+                          {
+                            backgroundColor: newQDifficulty === d ? colors.primary : colors.muted,
+                            borderRadius: 12,
+                            flex: 1,
+                            justifyContent: "center",
+                          },
+                        ]}
+                      >
+                        <Text style={[styles.catChipText, { color: newQDifficulty === d ? "#fff" : colors.mutedForeground }]}>
+                          {d.charAt(0).toUpperCase() + d.slice(1)}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                </View>
                 <View style={styles.addFormActions}>
                   <Button
                     label="Cancel"
@@ -1996,6 +2294,11 @@ const styles = StyleSheet.create({
   // gate
   gateSafeTop: { flex: 1, flexDirection: "column" },
   gateBack: { paddingHorizontal: 20, paddingVertical: 4 },
+  catLabel: {
+    fontFamily: "Inter_500Medium",
+    fontSize: 12,
+    letterSpacing: 1,
+  },
   gateLockWrap: { alignItems: "center", paddingTop: 32, paddingBottom: 24, gap: 10 },
   gateLockCircle: {
     width: 72, height: 72, borderRadius: 36,

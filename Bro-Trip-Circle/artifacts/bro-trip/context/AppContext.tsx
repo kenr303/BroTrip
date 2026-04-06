@@ -26,6 +26,22 @@ export interface VerificationQuestion {
   question: string;
   answers: string[]; // multiple accepted answers
   addedBy: string;
+  difficulty?: "easy" | "medium" | "hard"; // defaults to "medium" if unset
+}
+
+export interface AuthRiskState {
+  suspicionScore: number;
+  consecutiveFailures: number;
+  lastSuccessAt: string | null;
+  lockedUntil: string | null;
+  reentryCode: string | null;
+  reentryCodeExpiresAt: string | null;
+  successHistory: string[]; // ISO timestamps, last 10
+  lastAttemptAt: string | null;
+}
+
+export interface QuestionUsage {
+  [questionId: string]: { usageCount: number; lastUsedAt: string | null };
 }
 
 export interface JoinRequest {
