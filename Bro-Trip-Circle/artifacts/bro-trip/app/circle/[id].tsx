@@ -2202,11 +2202,11 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     paddingHorizontal: 16,
-    paddingBottom: 12,
-    gap: 8,
-    borderBottomWidth: 1,
   },
-  navBack: { padding: 4 },
+
+  navBack: {
+    padding: 4,
+  },
   navBtn: { width: 40, height: 40, alignItems: "center", justifyContent: "center" },
   navTitle: { fontFamily: "Inter_700Bold", fontSize: 18 },
   navSub: { fontFamily: "Inter_500Medium", fontSize: 12 },
@@ -2292,7 +2292,12 @@ const styles = StyleSheet.create({
   postBtn: { paddingHorizontal: 18, paddingVertical: 8 },
   postBtnText: { fontFamily: "Inter_600SemiBold", fontSize: 14 },
   // gate
-  gateSafeTop: { flex: 1, flexDirection: "column" },
+  gateSafeTop: {
+    flexGrow: 1,
+    justifyContent: "center",
+    paddingHorizontal: 24,
+    paddingTop: 12,
+  },
   gateBack: { paddingHorizontal: 20, paddingVertical: 4 },
   catLabel: {
     fontFamily: "Inter_500Medium",
