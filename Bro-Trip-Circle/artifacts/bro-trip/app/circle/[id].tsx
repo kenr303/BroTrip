@@ -33,6 +33,7 @@ import {
   TIMER_SECONDS,
   applyReentryCode,
   applyTimeout,
+  applyCooldownExpiry,
   applyWrongAnswer,
   checkAnswer,
   getRiskLevel,
@@ -459,7 +460,9 @@ export default function CircleDetailScreen() {
     async (circleArg: typeof circle, errorMessage?: string) => {
       if (!circleArg || !currentUser) return;
 
-      const state = await loadRiskState(currentUser.id, circleArg.id);
+      let state = await loadRiskState(currentUser.id, circleArg.id);
+      state = applyCooldownExpiry(state);
+      await saveRiskState(currentUser.id, circleArg.id, state);
 
       if (isLocked(state)) {
         setGateLocked(true);
@@ -475,7 +478,15 @@ export default function CircleDetailScreen() {
       const selected = selectQuestions(circleArg.questions, usage, level);
 
       if (!selected.length) {
-        setVerified(true);
+        // If circle truly has no questions, allow entry
+        if (!circleArg.questions.length) {
+          setVerified(true);
+          return;
+        }
+
+        // Otherwise, block entry (something is wrong or too risky)
+        setGateLocked(false);
+        setGateError("Verification required. Please try again.");
         return;
       }
 

@@ -32,7 +32,7 @@ const PENALTIES = {
 
 const LIMITS = {
   consecutiveFailuresToLock: 5,
-  cooldownMinutes: 30,
+  cooldownMinutes: 1,
   reentryCodeMinutes: 10,
   recoverySpacingMinutes: 60,
   recoveryMilestoneSuccesses: 3,
@@ -365,4 +365,29 @@ export function selectQuestions(
   }
 
   return [];
+}
+
+export function applyCooldownExpiry(inputState: AuthRiskState): AuthRiskState {
+  const state = normalizeState(inputState);
+
+  // No lock has ever been set, so do nothing
+  if (!state.lockedUntil) {
+    return state;
+  }
+
+  // Lock is still active, so do nothing
+  if (isDateInFuture(state.lockedUntil)) {
+    return state;
+  }
+
+  // Lock existed but has now expired: reset ONCE
+  return {
+    ...state,
+    lockedUntil: null,
+    reentryCode: null,
+    reentryCodeExpiresAt: null,
+    consecutiveFailures: 0,
+    suspicionScore: 6, // high risk, but not critical
+    lastAttemptAt: nowIso(),
+  };
 }
