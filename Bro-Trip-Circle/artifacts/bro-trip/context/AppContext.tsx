@@ -44,6 +44,26 @@ export interface QuestionUsage {
   [questionId: string]: { usageCount: number; lastUsedAt: string | null };
 }
 
+export interface AppNotification {
+  id: string;
+  type:
+    | "member_joined"
+    | "timeline_post"
+    | "comment"
+    | "reaction"
+    | "itinerary_added"
+    | "budget_update"
+    | "join_approved"
+    | "join_request"
+    | "security_alert";
+  circleId: string;
+  circleName: string;
+  title: string;
+  body: string;
+  read: boolean;
+  createdAt: string;
+}
+
 export interface JoinRequest {
   id: string;
   userId: string;
@@ -157,6 +177,13 @@ interface AppContextType {
   updateTimelineEntry: (circleId: string, entryId: string, updates: Partial<TimelineEntry>) => Promise<void>;
   addReaction: (circleId: string, entryId: string, reaction: Reaction) => Promise<void>;
   addComment: (circleId: string, entryId: string, comment: Comment) => Promise<void>;
+
+  notifications: AppNotification[];
+  unreadCount: number;
+  addNotification: (n: Omit<AppNotification, "id" | "createdAt" | "read">) => Promise<void>;
+  markNotificationRead: (id: string) => Promise<void>;
+  markAllNotificationsRead: () => Promise<void>;
+  clearNotifications: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType | null>(null);
@@ -164,26 +191,47 @@ const AppContext = createContext<AppContextType | null>(null);
 const KEYS = {
   USER: "bt_user",
   CIRCLES: "bt_circles",
+  NOTIFICATIONS: "bt_notifications",
 };
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [currentUser, setCurrentUserState] = useState<User | null>(null);
   const [circles, setCircles] = useState<Circle[]>([]);
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
     (async () => {
       try {
-        const [u, c] = await Promise.all([
+        const [u, c, n] = await Promise.all([
           AsyncStorage.getItem(KEYS.USER),
           AsyncStorage.getItem(KEYS.CIRCLES),
+          AsyncStorage.getItem(KEYS.NOTIFICATIONS),
         ]);
         if (u) setCurrentUserState(JSON.parse(u));
         if (c) setCircles(JSON.parse(c));
+        if (n) setNotifications(JSON.parse(n));
       } catch (_) {}
       finally { setIsLoading(false); }
     })();
   }, []);
+
+  // Reads latest from storage to avoid stale closure — safe to call inside any callback
+  const pushNotification = async (notif: Omit<AppNotification, "id" | "createdAt" | "read">) => {
+    const raw = await AsyncStorage.getItem(KEYS.NOTIFICATIONS);
+    const current: AppNotification[] = raw ? JSON.parse(raw) : [];
+    const next: AppNotification[] = [
+      {
+        ...notif,
+        id: `${Date.now()}${Math.random().toString(36).slice(2)}`,
+        createdAt: new Date().toISOString(),
+        read: false,
+      },
+      ...current,
+    ].slice(0, 100);
+    setNotifications(next);
+    await AsyncStorage.setItem(KEYS.NOTIFICATIONS, JSON.stringify(next));
+  };
 
   const saveCircles = async (next: Circle[]) => {
     setCircles(next);
@@ -227,7 +275,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
     const already = circles.find((c) => c.id === circle.id);
     if (already) {
-      // Update if re-joining
       const next = circles.map((c) =>
         c.id !== circle.id
           ? c
@@ -248,6 +295,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       };
       await saveCircles([...circles, updated]);
     }
+    await pushNotification({
+      type: "member_joined",
+      circleId: circle.id,
+      circleName: circle.name,
+      title: "Joined a circle",
+      body: `You joined ${circle.name}!`,
+    });
   }, [circles, currentUser]);
 
   const leaveCircle = useCallback(async (circleId: string) => {
@@ -279,12 +333,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       c.id === circleId ? { ...c, joinRequests: [...(c.joinRequests || []), req] } : c
     );
     await saveCircles(next);
+    const circle = circles.find((c) => c.id === circleId);
+    await pushNotification({
+      type: "join_request",
+      circleId,
+      circleName: circle?.name ?? "",
+      title: "Join request sent",
+      body: `Your request to join ${circle?.name ?? "the circle"} is pending approval.`,
+    });
   }, [circles]);
 
   const approveJoin = useCallback(async (circleId: string, reqId: string) => {
+    const circle = circles.find((c) => c.id === circleId);
+    const req = (circle?.joinRequests || []).find((r) => r.id === reqId);
     const next = circles.map((c) => {
       if (c.id !== circleId) return c;
-      const req = (c.joinRequests || []).find((r) => r.id === reqId);
       if (!req) return c;
       const newMember: CircleMember = {
         userId: req.userId,
@@ -301,6 +364,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       };
     });
     await saveCircles(next);
+    if (req && circle) {
+      await pushNotification({
+        type: "join_approved",
+        circleId,
+        circleName: circle.name,
+        title: "Join request approved",
+        body: `${req.userName} was approved to join ${circle.name}.`,
+      });
+    }
   }, [circles]);
 
   const rejectJoin = useCallback(async (circleId: string, reqId: string) => {
@@ -318,6 +390,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [circles]);
 
   const addItineraryItem = useCallback(async (circleId: string, item: ItineraryItem, budgetItem?: BudgetItem, timelineEntry?: TimelineEntry) => {
+    const circle = circles.find((c) => c.id === circleId);
     const next = circles.map((c) => {
       if (c.id !== circleId) return c;
       const updated = { ...c, itinerary: [...c.itinerary, item] };
@@ -326,6 +399,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return updated;
     });
     await saveCircles(next);
+    await pushNotification({
+      type: "itinerary_added",
+      circleId,
+      circleName: circle?.name ?? "",
+      title: "Activity added",
+      body: `Day ${item.day} · ${item.title}${budgetItem ? ` · $${budgetItem.amount.toFixed(2)}` : ""}`,
+    });
   }, [circles]);
 
   const updateItineraryItem = useCallback(async (circleId: string, itemId: string, updates: Partial<ItineraryItem>, options?: { removeBudgetItemId?: string; addBudgetItem?: BudgetItem; addTimelineEntry?: TimelineEntry }) => {
@@ -354,10 +434,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [circles]);
 
   const addBudgetItem = useCallback(async (circleId: string, item: BudgetItem) => {
+    const circle = circles.find((c) => c.id === circleId);
     const next = circles.map((c) =>
       c.id === circleId ? { ...c, budget: [...c.budget, item] } : c
     );
     await saveCircles(next);
+    await pushNotification({
+      type: "budget_update",
+      circleId,
+      circleName: circle?.name ?? "",
+      title: "Expense added",
+      body: `${item.title} · $${item.amount.toFixed(2)} (${item.category})`,
+    });
   }, [circles]);
 
   const removeBudgetItem = useCallback(async (circleId: string, itemId: string) => {
@@ -370,10 +458,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [circles]);
 
   const addTimelineEntry = useCallback(async (circleId: string, entry: TimelineEntry) => {
+    const circle = circles.find((c) => c.id === circleId);
     const next = circles.map((c) =>
       c.id === circleId ? { ...c, timeline: [entry, ...c.timeline] } : c
     );
     await saveCircles(next);
+    await pushNotification({
+      type: "timeline_post",
+      circleId,
+      circleName: circle?.name ?? "",
+      title: "New post",
+      body: entry.caption ? `"${entry.caption.slice(0, 80)}"` : `A new post was added to ${circle?.name ?? "the circle"}.`,
+    });
   }, [circles]);
 
   const removeTimelineEntry = useCallback(async (circleId: string, entryId: string) => {
@@ -415,6 +511,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [circles]);
 
   const addComment = useCallback(async (circleId: string, entryId: string, comment: Comment) => {
+    const circle = circles.find((c) => c.id === circleId);
     const next = circles.map((c) => {
       if (c.id !== circleId) return c;
       return {
@@ -425,7 +522,41 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       };
     });
     await saveCircles(next);
+    await pushNotification({
+      type: "comment",
+      circleId,
+      circleName: circle?.name ?? "",
+      title: "New comment",
+      body: comment.text.length > 80 ? comment.text.slice(0, 80) + "…" : comment.text,
+    });
   }, [circles]);
+
+  const markNotificationRead = useCallback(async (id: string) => {
+    setNotifications((prev) => {
+      const next = prev.map((n) => (n.id === id ? { ...n, read: true } : n));
+      AsyncStorage.setItem(KEYS.NOTIFICATIONS, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const markAllNotificationsRead = useCallback(async () => {
+    setNotifications((prev) => {
+      const next = prev.map((n) => ({ ...n, read: true }));
+      AsyncStorage.setItem(KEYS.NOTIFICATIONS, JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const clearNotifications = useCallback(async () => {
+    setNotifications([]);
+    await AsyncStorage.removeItem(KEYS.NOTIFICATIONS);
+  }, []);
+
+  const addNotification = useCallback(async (notif: Omit<AppNotification, "id" | "createdAt" | "read">) => {
+    await pushNotification(notif);
+  }, []);
+
+  const unreadCount = notifications.filter((n) => !n.read).length;
 
   return (
     <AppContext.Provider
@@ -454,6 +585,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         updateTimelineEntry,
         addReaction,
         addComment,
+        notifications,
+        unreadCount,
+        addNotification,
+        markNotificationRead,
+        markAllNotificationsRead,
+        clearNotifications,
       }}
     >
       {children}

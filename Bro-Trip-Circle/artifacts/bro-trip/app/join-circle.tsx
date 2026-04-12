@@ -88,7 +88,7 @@ const RISK_LABEL: Record<RiskLevel, string> = {
 export default function JoinCircleScreen() {
   const colors = useColors();
   const router = useRouter();
-  const { currentUser, joinCircle, circles, requestJoin } = useApp();
+  const { currentUser, joinCircle, circles, requestJoin, addNotification } = useApp();
 
   const [step, setStep] = useState<Step>("code");
   const [inviteCode, setInviteCode] = useState("");
@@ -157,6 +157,13 @@ export default function JoinCircleScreen() {
       if (isLocked(state)) {
         setStep("locked");
         if (state.lockedUntil) startLockTimer(state.lockedUntil);
+        await addNotification({
+          type: "security_alert",
+          circleId: foundCircle.id,
+          circleName: foundCircle.name,
+          title: "Account locked",
+          body: `Access to ${foundCircle.name} is locked after too many failed attempts.`,
+        });
       } else {
         await beginVerification(foundCircle, state, {
           errorMessage: "Time's up! Try again.",
@@ -233,6 +240,13 @@ export default function JoinCircleScreen() {
       if (isLocked(state)) {
         setStep("locked");
         if (state.lockedUntil) startLockTimer(state.lockedUntil);
+        await addNotification({
+          type: "security_alert",
+          circleId: foundCircle.id,
+          circleName: foundCircle.name,
+          title: "Account locked",
+          body: `Access to ${foundCircle.name} locked after too many wrong answers.`,
+        });
         return;
       }
 

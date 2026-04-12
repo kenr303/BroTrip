@@ -1,10 +1,8 @@
 import { Feather } from "@expo/vector-icons";
-import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
-import React, { useState, useCallback, useRef, useEffect } from "react";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import React, { useState } from "react";
 import {
   Alert,
-  Image,
-  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -13,11 +11,9 @@ import {
   StyleSheet,
   Switch,
   Text,
-  TextInput,
   View,
 } from "react-native";
 import * as Haptics from "expo-haptics";
-import * as ImagePicker from "expo-image-picker";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -29,20 +25,9 @@ import {
   VerificationQuestion,
 } from "@/context/AppContext";
 import { useColors } from "@/hooks/useColors";
-import {
-  TIMER_SECONDS,
-  applyReentryCode,
-  applyTimeout,
-  applyCooldownExpiry,
-  applyWrongAnswer,
-  checkAnswer,
-  getRiskLevel,
-  isLocked,
-  loadQuestionUsage,
-  loadRiskState,
-  saveRiskState,
-  selectQuestions,
-} from "@/lib/authRisk";
+import { EntryCard } from "@/components/circle/EntryCard";
+import { TimelineComposer } from "@/components/circle/TimelineComposer";
+import { VerificationGate } from "@/components/circle/VerificationGate";
 
 function uid() {
   return Date.now().toString() + Math.random().toString(36).substr(2, 6);
@@ -61,6 +46,18 @@ function timeAgo(dateStr: string): string {
 /** Validate "HH:MM AM/PM" time format */
 function isValidTime(t: string): boolean {
   return /^(0?[1-9]|1[0-2]):\d{2}\s?(AM|PM)$/i.test(t.trim());
+}
+
+/** Convert "H:MM AM/PM" to minutes since midnight for reliable numeric sorting. */
+function timeToMinutes(t: string): number {
+  const match = t.trim().match(/^(\d{1,2}):(\d{2})\s?(AM|PM)$/i);
+  if (!match) return 0;
+  let h = parseInt(match[1]);
+  const m = parseInt(match[2]);
+  const meridiem = match[3].toUpperCase();
+  if (meridiem === "AM" && h === 12) h = 0;
+  if (meridiem === "PM" && h !== 12) h += 12;
+  return h * 60 + m;
 }
 
 /** Validate "MM/DD/YYYY" date format */
@@ -95,7 +92,6 @@ function activityDate(startDateStr: string, dayNum: number, timeStr: string): Da
   return base;
 }
 
-const REACTIONS = ["🔥", "😂", "❤️", "🤙", "💀", "🙌"];
 const BUDGET_ICONS: Record<string, string> = {
   transport: "truck",
   food: "coffee",
@@ -112,224 +108,6 @@ const BUDGET_CATEGORIES = [
 ] as const;
 
 type Tab = "timeline" | "itinerary" | "budget" | "members";
-
-// ── Timeline Entry Card ─────────────────────────────────────────────────────
-function EntryCard({
-  entry,
-  circleId,
-  memberNickname,
-}: {
-  entry: TimelineEntry;
-  circleId: string;
-  memberNickname: (userId: string) => string;
-}) {
-  const colors = useColors();
-  const { currentUser, addReaction, addComment, removeTimelineEntry, updateTimelineEntry } = useApp();
-  const [showReactions, setShowReactions] = useState(false);
-  const [showComments, setShowComments] = useState(false);
-  const [commentText, setCommentText] = useState("");
-  const [isEditing, setIsEditing] = useState(false);
-  const [editCaption, setEditCaption] = useState(entry.caption);
-
-  const myReaction = entry.reactions.find((r) => r.userId === currentUser?.id);
-  const reactionCounts: Record<string, number> = {};
-  entry.reactions.forEach((r) => {
-    reactionCounts[r.emoji] = (reactionCounts[r.emoji] || 0) + 1;
-  });
-
-  const handleReact = (emoji: string) => {
-    if (!currentUser) return;
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    addReaction(circleId, entry.id, { userId: currentUser.id, emoji });
-    setShowReactions(false);
-  };
-
-  const handleComment = () => {
-    if (!commentText.trim() || !currentUser) return;
-    addComment(circleId, entry.id, {
-      id: uid(),
-      userId: currentUser.id,
-      text: commentText.trim(),
-      createdAt: new Date().toISOString(),
-    });
-    setCommentText("");
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  };
-
-  const handleSaveEdit = () => {
-    updateTimelineEntry(circleId, entry.id, { caption: editCaption.trim() });
-    setIsEditing(false);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  };
-
-  const isOwn = entry.userId === currentUser?.id;
-
-  return (
-    <View
-      style={[
-        styles.entryCard,
-        {
-          backgroundColor: colors.card,
-          borderRadius: colors.radius - 4,
-          borderColor: colors.border,
-          shadowColor: "#000",
-          shadowOffset: { width: 0, height: 1 },
-          shadowOpacity: 0.05,
-          shadowRadius: 4,
-          elevation: 2,
-        },
-      ]}
-    >
-      {entry.type === "event" && entry.eventLabel && (
-        <View style={[styles.eventBadge, { backgroundColor: colors.primary + "15" }]}>
-          <Feather name="clock" size={12} color={colors.primary} />
-          <Text style={[styles.eventBadgeText, { color: colors.primary }]}>
-            {entry.eventLabel}
-          </Text>
-        </View>
-      )}
-
-      <View style={styles.entryHeader}>
-        <View style={[styles.entryAvatar, { backgroundColor: colors.primary + "20" }]}>
-          <Text style={[styles.entryAvatarText, { color: colors.primary }]}>
-            {memberNickname(entry.userId).charAt(0).toUpperCase()}
-          </Text>
-        </View>
-        <View style={{ flex: 1 }}>
-          <Text style={[styles.entryAuthor, { color: colors.foreground }]}>
-            {memberNickname(entry.userId)}
-          </Text>
-          <Text style={[styles.entryTime, { color: colors.mutedForeground }]}>
-            {timeAgo(entry.createdAt)}
-          </Text>
-        </View>
-        {isOwn && (
-          <View style={{ flexDirection: "row", gap: 10 }}>
-            <Pressable onPress={() => { setEditCaption(entry.caption); setIsEditing(true); }}>
-              <Feather name="edit-2" size={15} color={colors.mutedForeground} />
-            </Pressable>
-            <Pressable
-              onPress={() =>
-                Alert.alert("Delete post?", "This cannot be undone.", [
-                  { text: "Cancel", style: "cancel" },
-                  { text: "Delete", style: "destructive", onPress: () => removeTimelineEntry(circleId, entry.id) },
-                ])
-              }
-            >
-              <Feather name="trash-2" size={15} color={colors.destructive} />
-            </Pressable>
-          </View>
-        )}
-      </View>
-
-      {isEditing ? (
-        <View style={[styles.editArea, { borderTopColor: colors.border }]}>
-          <TextInput
-            value={editCaption}
-            onChangeText={setEditCaption}
-            multiline
-            autoFocus
-            style={[styles.editField, { color: colors.foreground, fontFamily: "Inter_400Regular", borderColor: colors.primary }]}
-          />
-          <View style={styles.editActions}>
-            <Pressable onPress={() => setIsEditing(false)} style={[styles.editBtn, { backgroundColor: colors.muted, borderRadius: 8 }]}>
-              <Text style={[styles.editBtnText, { color: colors.mutedForeground }]}>Cancel</Text>
-            </Pressable>
-            <Pressable onPress={handleSaveEdit} style={[styles.editBtn, { backgroundColor: colors.primary, borderRadius: 8 }]}>
-              <Text style={[styles.editBtnText, { color: "#fff" }]}>Save</Text>
-            </Pressable>
-          </View>
-        </View>
-      ) : entry.caption ? (
-        <Text style={[styles.entryCaption, { color: colors.foreground }]}>{entry.caption}</Text>
-      ) : null}
-
-      {entry.images.length > 0 && (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imageRow}>
-          {entry.images.map((uri, i) => (
-            <Image
-              key={i}
-              source={{ uri }}
-              style={[styles.entryImage, { borderRadius: colors.radius - 8 }]}
-            />
-          ))}
-        </ScrollView>
-      )}
-
-      <View style={styles.entryActions}>
-        <Pressable onPress={() => setShowReactions((v) => !v)} style={styles.actionBtn}>
-          <Text style={styles.reactionEmoji}>{myReaction?.emoji || "🔥"}</Text>
-          <Text style={[styles.actionCount, { color: colors.mutedForeground }]}>
-            {entry.reactions.length}
-          </Text>
-        </Pressable>
-        <Pressable onPress={() => setShowComments((v) => !v)} style={styles.actionBtn}>
-          <Feather name="message-circle" size={18} color={colors.mutedForeground} />
-          <Text style={[styles.actionCount, { color: colors.mutedForeground }]}>
-            {entry.comments.length}
-          </Text>
-        </Pressable>
-        {Object.entries(reactionCounts).map(([emoji, count]) => (
-          <View
-            key={emoji}
-            style={[styles.reactionChip, { backgroundColor: colors.muted, borderRadius: 10 }]}
-          >
-            <Text style={{ fontSize: 13 }}>{emoji}</Text>
-            <Text style={[styles.actionCount, { color: colors.mutedForeground }]}>{count}</Text>
-          </View>
-        ))}
-      </View>
-
-      {showReactions && (
-        <View style={[styles.reactionPicker, { borderTopColor: colors.border }]}>
-          {REACTIONS.map((e) => (
-            <Pressable key={e} onPress={() => handleReact(e)} style={styles.reactionOption}>
-              <Text style={{ fontSize: 26 }}>{e}</Text>
-            </Pressable>
-          ))}
-        </View>
-      )}
-
-      {showComments && (
-        <View style={[styles.commentsArea, { borderTopColor: colors.border }]}>
-          {entry.comments.map((c) => (
-            <View key={c.id} style={styles.comment}>
-              <View style={[styles.commentAvatar, { backgroundColor: colors.muted }]}>
-                <Text style={[styles.commentAvatarText, { color: colors.mutedForeground }]}>
-                  {memberNickname(c.userId).charAt(0).toUpperCase()}
-                </Text>
-              </View>
-              <View style={[styles.commentBubble, { backgroundColor: colors.muted, borderRadius: 12 }]}>
-                <Text style={[styles.commentText, { color: colors.foreground }]}>{c.text}</Text>
-              </View>
-            </View>
-          ))}
-          <View style={[styles.commentInputRow, { borderTopColor: colors.border }]}>
-            <TextInput
-              value={commentText}
-              onChangeText={setCommentText}
-              placeholder="Say something..."
-              placeholderTextColor={colors.mutedForeground}
-              style={[
-                styles.commentField,
-                { color: colors.foreground, fontFamily: "Inter_400Regular" },
-              ]}
-              onSubmitEditing={handleComment}
-              returnKeyType="send"
-            />
-            <Pressable onPress={handleComment}>
-              <Feather
-                name="send"
-                size={17}
-                color={commentText.trim() ? colors.primary : colors.mutedForeground}
-              />
-            </Pressable>
-          </View>
-        </View>
-      )}
-    </View>
-  );
-}
 
 // ── Activity Form (shared for add + edit) ────────────────────────────────────
 interface ActivityFormState {
@@ -392,226 +170,9 @@ export default function CircleDetailScreen() {
   const circle = circles.find((c) => c.id === id);
   const [activeTab, setActiveTab] = useState<Tab>("timeline");
 
-  // ─── Entry verification gate ────────────────────────────────────────────────
   const [verified, setVerified] = useState(false);
-  const [gateQ, setGateQ] = useState<VerificationQuestion | null>(null);
-  const [gateAnswer, setGateAnswer] = useState("");
-  const [gateError, setGateError] = useState("");
 
-
-  // ✅ ADD EVERYTHING BELOW HERE
-
-  const [gateQuestions, setGateQuestions] = useState<VerificationQuestion[]>([]);
-  const [gateIndex, setGateIndex] = useState(0);
-
-  const [gateRiskLevel, setGateRiskLevel] = useState<
-    "low" | "moderate" | "high" | "critical"
-  >("low");
-
-  const [gateTimerSecs, setGateTimerSecs] = useState(0);
-  const [gateTimerExpired, setGateTimerExpired] = useState(false);
-
-  const [gateLocked, setGateLocked] = useState(false);
-  const [gateLockRemainingSecs, setGateLockRemainingSecs] = useState(0);
-
-  const [gateReentryCode, setGateReentryCode] = useState("");
-  const [gateReentryError, setGateReentryError] = useState("");
-  const gateTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const gateLockTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const startGateTimer = useCallback((secs: number) => {
-    if (gateTimerRef.current) clearInterval(gateTimerRef.current);
-    setGateTimerSecs(secs);
-    setGateTimerExpired(false);
-
-    if (secs <= 0) return;
-
-    gateTimerRef.current = setInterval(() => {
-      setGateTimerSecs((prev) => {
-        if (prev <= 1) {
-          if (gateTimerRef.current) clearInterval(gateTimerRef.current);
-          setGateTimerExpired(true);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-  }, []);
-
-  const startGateLockTimer = useCallback((until: string) => {
-    if (gateLockTimerRef.current) clearInterval(gateLockTimerRef.current);
-
-    const update = () => {
-      const remain = Math.max(
-        0,
-        Math.ceil((new Date(until).getTime() - Date.now()) / 1000)
-      );
-      setGateLockRemainingSecs(remain);
-      if (remain <= 0 && gateLockTimerRef.current) {
-        clearInterval(gateLockTimerRef.current);
-      }
-    };
-
-    update();
-    gateLockTimerRef.current = setInterval(update, 1000);
-  }, []);
-
-  const beginGateVerification = useCallback(
-    async (circleArg: typeof circle, errorMessage?: string) => {
-      if (!circleArg || !currentUser) return;
-
-      let state = await loadRiskState(currentUser.id, circleArg.id);
-      state = applyCooldownExpiry(state);
-      await saveRiskState(currentUser.id, circleArg.id, state);
-
-      if (isLocked(state)) {
-        setGateLocked(true);
-        setGateError("");
-        if (state.lockedUntil) startGateLockTimer(state.lockedUntil);
-        return;
-      }
-
-      const level = getRiskLevel(state);
-      setGateRiskLevel(level);
-
-      const usage = await loadQuestionUsage(circleArg.id);
-      const selected = selectQuestions(circleArg.questions, usage, level);
-
-      if (!selected.length) {
-        // If circle truly has no questions, allow entry
-        if (!circleArg.questions.length) {
-          setVerified(true);
-          return;
-        }
-
-        // Otherwise, block entry (something is wrong or too risky)
-        setGateLocked(false);
-        setGateError("Verification required. Please try again.");
-        return;
-      }
-
-      setGateQuestions(selected);
-      setGateIndex(0);
-      setGateQ(selected[0]);
-      setGateAnswer("");
-      setGateError(errorMessage || "");
-      setGateLocked(false);
-      startGateTimer(TIMER_SECONDS[level]);
-    },
-    [currentUser, startGateLockTimer, startGateTimer]
-  );
-
-  const handleGateReentrySubmit = async () => {
-    if (!circle || !currentUser) return;
-
-    const state = await loadRiskState(currentUser.id, circle.id);
-    const { success, state: next } = applyReentryCode(state, gateReentryCode);
-
-    if (!success) {
-      setGateReentryError("Invalid or expired code.");
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      return;
-    }
-
-    await saveRiskState(currentUser.id, circle.id, next);
-
-    setGateReentryError("");
-    setGateReentryCode("");
-    setGateLocked(false);
-
-    if (gateLockTimerRef.current) clearInterval(gateLockTimerRef.current);
-
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    await beginGateVerification(circle);
-  };
-  // Keep a fresh ref to circles so the focus callback never has stale data
-  const circlesRef = useRef(circles);
-  useEffect(() => {
-    if (!gateTimerExpired || !circle || !currentUser) return;
-
-    (async () => {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-
-      let state = await loadRiskState(currentUser.id, circle.id);
-      state = applyTimeout(state);
-      await saveRiskState(currentUser.id, circle.id, state);
-
-      if (isLocked(state)) {
-        setGateLocked(true);
-        setGateError("");
-        if (state.lockedUntil) startGateLockTimer(state.lockedUntil);
-      } else {
-        await beginGateVerification(circle, "Time's up! Try again.");
-      }
-    })();
-  }, [gateTimerExpired, circle, currentUser, beginGateVerification, startGateLockTimer]);
-
-  useFocusEffect(
-    useCallback(() => {
-      const c = circlesRef.current.find((c) => c.id === id);
-      if (!c) return;
-
-      setVerified(false);
-      setGateAnswer("");
-      setGateError("");
-      setGateLocked(false);
-      setGateReentryCode("");
-      setGateReentryError("");
-
-      beginGateVerification(c);
-
-      return () => {
-        if (gateTimerRef.current) clearInterval(gateTimerRef.current);
-        if (gateLockTimerRef.current) clearInterval(gateLockTimerRef.current);
-      };
-    }, [id, beginGateVerification])
-  );
-
-  const handleGateSubmit = async () => {
-    if (!circle || !currentUser || !gateQ) return;
-
-    if (gateTimerRef.current) clearInterval(gateTimerRef.current);
-
-    const input = gateAnswer ?? "";
-    const state = await loadRiskState(currentUser.id, circle.id);
-    const correct = checkAnswer(input, gateQ.answers);
-
-    if (!correct) {
-      const next = applyWrongAnswer(state);
-      await saveRiskState(currentUser.id, circle.id, next);
-
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-
-      if (isLocked(next)) {
-        setGateLocked(true);
-        setGateError("");
-        if (next.lockedUntil) startGateLockTimer(next.lockedUntil);
-        return;
-      }
-
-      await beginGateVerification(
-        circle,
-        next.consecutiveFailures >= 3
-          ? `Wrong. ${Math.max(0, 5 - next.consecutiveFailures)} attempt${5 - next.consecutiveFailures === 1 ? "" : "s"
-          } left.`
-          : "Wrong answer. Try again."
-      );
-      return;
-    }
-
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    setVerified(true);
-  };
-  // ─────────────────────────────────────────────────────────────────────────────
-
-  // Timeline composer
   const [composerOpen, setComposerOpen] = useState(false);
-  const [composerType, setComposerType] = useState<"post" | "event">("post");
-  const [caption, setCaption] = useState("");
-  const [images, setImages] = useState<string[]>([]);
-  const [day, setDay] = useState("");
-  const [eventTime, setEventTime] = useState("");
-  const [eventLabel, setEventLabel] = useState("");
 
   // Itinerary: add form
   const [showAddItem, setShowAddItem] = useState(false);
@@ -649,159 +210,7 @@ export default function CircleDetailScreen() {
     );
   }
 
-  // ─── Verification gate screen ────────────────────────────────────────────────
-  if (!verified) {
-    const lockMins = Math.floor(gateLockRemainingSecs / 60);
-    const lockSecs = gateLockRemainingSecs % 60;
-
-    return (
-      <KeyboardAvoidingView
-        style={{ flex: 1, backgroundColor: colors.navy }}
-        behavior={Platform.OS === "ios" ? "padding" : "height"}
-        keyboardVerticalOffset={0}
-      >
-        <Pressable style={{ flex: 1 }} onPress={Keyboard.dismiss}>
-          <ScrollView
-            style={{ flex: 1 }}
-            contentContainerStyle={{
-              flexGrow: 1,
-              paddingTop: insets.top + 12,
-              paddingBottom: insets.bottom + 24,
-            }}
-            keyboardShouldPersistTaps="handled"
-            keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "on-drag"}
-            showsVerticalScrollIndicator={false}
-          >
-            <View style={styles.gateSafeTop}>
-              <Pressable onPress={() => router.back()} style={styles.gateBack}>
-                <Feather name="arrow-left" size={20} color="#fff" />
-              </Pressable>
-
-              <View style={styles.gateLockWrap}>
-                <View style={styles.gateLockCircle}>
-                  <Feather
-                    name={gateLocked ? "alert-triangle" : "lock"}
-                    size={28}
-                    color="#fff"
-                  />
-                </View>
-                <Text style={styles.gateCircleName}>{circle.name}</Text>
-                <Text style={styles.gateSubtitle}>
-                  {gateLocked ? "Access locked" : "Answer to enter"}
-                </Text>
-              </View>
-
-              {gateLocked ? (
-                <>
-                  <View
-                    style={[
-                      styles.gateCard,
-                      {
-                        backgroundColor: "#ffffff0F",
-                        borderColor: "#ffffff20",
-                      },
-                    ]}
-                  >
-                    <Text style={styles.gateQuestionLabel}>Waifu ALERT!!</Text>
-                    <Text style={styles.gateQuestion}>Ask the BIG Bro for code</Text>
-                    {gateLockRemainingSecs > 0 ? (
-                      <Text style={[styles.gateError, { color: "#fff", marginTop: 8 }]}>
-                        Cooldown: {lockMins}:{String(lockSecs).padStart(2, "0")}
-                      </Text>
-                    ) : null}
-                  </View>
-
-                  <View style={styles.gateInputWrap}>
-                    <TextInput
-                      style={[
-                        styles.gateInput,
-                        {
-                          color: "#fff",
-                          borderColor: gateReentryError ? "#FF5C5C" : "#ffffff50",
-                        },
-                      ]}
-                      placeholder="Re-entry code"
-                      placeholderTextColor="#ffffff60"
-                      value={gateReentryCode}
-                      onChangeText={(v) => {
-                        setGateReentryCode(v.toUpperCase());
-                        setGateReentryError("");
-                      }}
-                      autoCapitalize="characters"
-                      returnKeyType="done"
-                      blurOnSubmit={false}
-                      onSubmitEditing={handleGateReentrySubmit}
-                    />
-                    {gateReentryError ? (
-                      <Text style={styles.gateError}>{gateReentryError}</Text>
-                    ) : null}
-                  </View>
-
-                  <Button
-                    label="Unlock Access"
-                    onPress={handleGateReentrySubmit}
-                    size="lg"
-                    style={{ marginHorizontal: 24 }}
-                  />
-                </>
-              ) : (
-                <>
-                  {gateQ ? (
-                    <View
-                      style={[
-                        styles.gateCard,
-                        {
-                          backgroundColor: "#ffffff0F",
-                          borderColor: "#ffffff20",
-                        },
-                      ]}
-                    >
-                      <Text style={styles.gateQuestionLabel}>
-                        Secret question · {gateRiskLevel} risk · {gateTimerSecs}s
-                      </Text>
-                      <Text style={styles.gateQuestion}>{gateQ.question}</Text>
-                    </View>
-                  ) : null}
-
-                  <View style={styles.gateInputWrap}>
-                    <TextInput
-                      style={[
-                        styles.gateInput,
-                        {
-                          color: "#fff",
-                          borderColor: gateError ? "#FF5C5C" : "#ffffff50",
-                        },
-                      ]}
-                      placeholder="Your answer…"
-                      placeholderTextColor="#ffffff60"
-                      value={gateAnswer}
-                      onChangeText={(v) => {
-                        setGateAnswer(v);
-                        setGateError("");
-                      }}
-                      autoCapitalize="none"
-                      returnKeyType="done"
-                      blurOnSubmit={false}
-                      onSubmitEditing={handleGateSubmit}
-                    />
-                    {gateError ? <Text style={styles.gateError}>{gateError}</Text> : null}
-                  </View>
-
-                  <Button
-                    label="Enter Circle"
-                    onPress={handleGateSubmit}
-                    size="lg"
-                    style={{ marginHorizontal: 24 }}
-                  />
-                </>
-              )}
-            </View>
-          </ScrollView>
-        </Pressable>
-      </KeyboardAvoidingView>
-    );
-  }
-  // ─────────────────────────────────────────────────────────────────────────────
+  if (!verified) return <VerificationGate circleId={id} onVerified={() => setVerified(true)} onBack={() => router.back()} />;
 
   const myMember = circle.members.find((m) => m.userId === currentUser?.id);
   const myNickname = myMember?.nickname || currentUser?.name || "";
@@ -812,8 +221,34 @@ export default function CircleDetailScreen() {
   const budgetPct =
     circle.totalBudget > 0 ? Math.min(totalSpent / circle.totalBudget, 1) : 0;
 
+  // ── Budget split calculations ─────────────────────────────────────────────
+  const splitSettlements = (() => {
+    if (circle.members.length < 2 || circle.budget.length === 0) return [];
+    const fairShare = totalSpent / circle.members.length;
+    const balances = circle.members.map((m) => {
+      const paid = circle.budget
+        .filter((b) => b.paidBy === m.userId)
+        .reduce((s, b) => s + b.amount, 0);
+      return { userId: m.userId, balance: paid - fairShare };
+    });
+    // Greedy settlement — minimise number of transactions
+    const debtors = balances.filter((b) => b.balance < -0.005).map((b) => ({ ...b }));
+    const creditors = balances.filter((b) => b.balance > 0.005).map((b) => ({ ...b }));
+    const result: { from: string; to: string; amount: number }[] = [];
+    let i = 0, j = 0;
+    while (i < debtors.length && j < creditors.length) {
+      const amount = Math.min(-debtors[i].balance, creditors[j].balance);
+      if (amount > 0.005) result.push({ from: debtors[i].userId, to: creditors[j].userId, amount });
+      debtors[i].balance += amount;
+      creditors[j].balance -= amount;
+      if (Math.abs(debtors[i].balance) < 0.005) i++;
+      if (Math.abs(creditors[j].balance) < 0.005) j++;
+    }
+    return result;
+  })();
+
   const sortedItinerary = [...circle.itinerary].sort((a, b) =>
-    a.day !== b.day ? a.day - b.day : a.time.localeCompare(b.time)
+    a.day !== b.day ? a.day - b.day : timeToMinutes(a.time) - timeToMinutes(b.time)
   );
   const days = [...new Set(sortedItinerary.map((i) => i.day))].sort(
     (a, b) => a - b
@@ -822,101 +257,6 @@ export default function CircleDetailScreen() {
   const pendingRequests = (circle.joinRequests || []).filter(
     (r) => r.status === "pending"
   );
-
-  // ── Helpers ─────────────────────────────────────────────────────────────
-
-  const pickImage = async () => {
-    const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ["images"],
-      allowsMultipleSelection: true,
-      quality: 0.8,
-    });
-    if (!res.canceled)
-      setImages((prev) => [...prev, ...res.assets.map((a) => a.uri)]);
-  };
-
-  const submitEntry = async () => {
-    if (!caption.trim() && images.length === 0 && composerType === "post") return;
-    if (composerType === "event" && !caption.trim() && !eventLabel.trim()) return;
-    if (!currentUser) return;
-
-    const label =
-      eventLabel.trim() ||
-      (day && eventTime
-        ? `Day ${day}, ${eventTime} – ${caption.substring(0, 40)}`
-        : "");
-
-    const entry: TimelineEntry = {
-      id: uid(),
-      userId: currentUser.id,
-      type: composerType,
-      day: day ? parseInt(day) : undefined,
-      eventTime: eventTime.trim() || undefined,
-      eventLabel: label || undefined,
-      caption: caption.trim(),
-      images,
-      reactions: [],
-      comments: [],
-      createdAt: new Date().toISOString(),
-    };
-    await addTimelineEntry(circle.id, entry);
-    setCaption("");
-    setImages([]);
-    setDay("");
-    setEventTime("");
-    setEventLabel("");
-    setComposerOpen(false);
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-  };
-
-  // ── Activity helpers ─────────────────────────────────────────────────────
-
-  /** Creates a budget item for an activity expense, returns its id */
-  const createActivityExpense = async (
-    f: ActivityFormState,
-    activityTitle: string
-  ): Promise<string | undefined> => {
-    const amount = parseFloat(f.expenseAmount);
-    if (!amount || !currentUser) return undefined;
-    const budgetItem: BudgetItem = {
-      id: uid(),
-      title: activityTitle,
-      amount,
-      paidBy: currentUser.id,
-      category: f.expenseCategory,
-      date: new Date().toISOString(),
-    };
-    await addBudgetItem(circle.id, budgetItem);
-    return budgetItem.id;
-  };
-
-  /** Creates a timeline event entry for an activity, returns its id */
-  const createActivityTimelineEntry = async (
-    f: ActivityFormState,
-    activityTitle: string
-  ): Promise<string | undefined> => {
-    if (!currentUser) return undefined;
-    const dayNum = parseInt(f.day) || 1;
-    const label = `Day ${dayNum}, ${f.time || "TBD"} – ${activityTitle}`;
-    // Compute the actual datetime for the event so it appears in the right
-    // chronological position on the timeline
-    const eventAt = activityDate(circle.startDate, dayNum, f.time);
-    const entry: TimelineEntry = {
-      id: uid(),
-      userId: currentUser.id,
-      type: "event",
-      day: dayNum,
-      eventTime: f.time || undefined,
-      eventLabel: label,
-      caption: f.notes.trim() || activityTitle,
-      images: [],
-      reactions: [],
-      comments: [],
-      createdAt: eventAt.toISOString(),
-    };
-    await addTimelineEntry(circle.id, entry);
-    return entry.id;
-  };
 
   const handleAddItem = async () => {
     if (!addForm.title.trim()) return;
@@ -1372,175 +712,12 @@ export default function CircleDetailScreen() {
         {/* ── TIMELINE ──────────────────────────────────────────── */}
         {activeTab === "timeline" && (
           <View style={styles.section}>
-            {composerOpen && (
-              <View
-                style={[
-                  styles.composer,
-                  {
-                    backgroundColor: colors.card,
-                    borderRadius: colors.radius,
-                    borderColor: colors.border,
-                  },
-                ]}
-              >
-                <View
-                  style={[
-                    styles.composerToggle,
-                    { backgroundColor: colors.muted, borderRadius: 10 },
-                  ]}
-                >
-                  {(["post", "event"] as const).map((type) => (
-                    <Pressable
-                      key={type}
-                      onPress={() => setComposerType(type)}
-                      style={[
-                        styles.composerToggleBtn,
-                        {
-                          backgroundColor:
-                            composerType === type ? colors.card : "transparent",
-                          borderRadius: 8,
-                        },
-                      ]}
-                    >
-                      <Feather
-                        name={type === "post" ? "camera" : "clock"}
-                        size={14}
-                        color={
-                          composerType === type
-                            ? colors.primary
-                            : colors.mutedForeground
-                        }
-                      />
-                      <Text
-                        style={[
-                          styles.composerToggleText,
-                          {
-                            color:
-                              composerType === type
-                                ? colors.primary
-                                : colors.mutedForeground,
-                          },
-                        ]}
-                      >
-                        {type === "post" ? "Post" : "Log Event"}
-                      </Text>
-                    </Pressable>
-                  ))}
-                </View>
-
-                {composerType === "event" && (
-                  <View style={styles.eventFields}>
-                    <View style={styles.eventFieldRow}>
-                      <View style={{ flex: 1 }}>
-                        <Input
-                          label="Day #"
-                          placeholder="e.g. 2"
-                          value={day}
-                          onChangeText={setDay}
-                          keyboardType="numeric"
-                        />
-                      </View>
-                      <View style={{ flex: 2 }}>
-                        <Input
-                          label="Time"
-                          placeholder="e.g. 7:00 PM"
-                          value={eventTime}
-                          onChangeText={setEventTime}
-                        />
-                      </View>
-                    </View>
-                    <Input
-                      label="Event Label (optional)"
-                      placeholder={`Day ${day || "?"}, ${eventTime || "?"} – e.g. buffet dinner`}
-                      value={eventLabel}
-                      onChangeText={setEventLabel}
-                    />
-                  </View>
-                )}
-
-                <TextInput
-                  placeholder={
-                    composerType === "post"
-                      ? "Share something with the crew..."
-                      : "What happened?"
-                  }
-                  placeholderTextColor={colors.mutedForeground}
-                  value={caption}
-                  onChangeText={setCaption}
-                  multiline
-                  style={[
-                    styles.composerInput,
-                    {
-                      color: colors.foreground,
-                      fontFamily: "Inter_400Regular",
-                      borderTopColor: colors.border,
-                    },
-                  ]}
-                />
-
-                {images.length > 0 && (
-                  <View style={styles.imagePreviewRow}>
-                    {images.map((uri, i) => (
-                      <View key={i} style={styles.imagePreviewWrap}>
-                        <Image
-                          source={{ uri }}
-                          style={[styles.imagePreview, { borderRadius: 8 }]}
-                        />
-                        <Pressable
-                          onPress={() =>
-                            setImages((prev) =>
-                              prev.filter((_, idx) => idx !== i)
-                            )
-                          }
-                          style={[
-                            styles.removeImg,
-                            { backgroundColor: colors.destructive },
-                          ]}
-                        >
-                          <Feather name="x" size={11} color="#fff" />
-                        </Pressable>
-                      </View>
-                    ))}
-                  </View>
-                )}
-
-                <View
-                  style={[styles.composerBar, { borderTopColor: colors.border }]}
-                >
-                  <Pressable onPress={pickImage} style={styles.composerBarBtn}>
-                    <Feather name="image" size={20} color={colors.mutedForeground} />
-                  </Pressable>
-                  <Pressable
-                    onPress={submitEntry}
-                    disabled={!caption.trim() && images.length === 0}
-                    style={[
-                      styles.postBtn,
-                      {
-                        backgroundColor:
-                          !caption.trim() && images.length === 0
-                            ? colors.muted
-                            : colors.primary,
-                        borderRadius: 18,
-                      },
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.postBtnText,
-                        {
-                          color:
-                            !caption.trim() && images.length === 0
-                              ? colors.mutedForeground
-                              : "#fff",
-                        },
-                      ]}
-                    >
-                      Post
-                    </Text>
-                  </Pressable>
-                </View>
-              </View>
-            )}
+            <TimelineComposer
+              circleId={circle.id}
+              circleStartDate={circle.startDate}
+              isOpen={composerOpen}
+              onClose={() => setComposerOpen(false)}
+            />
 
             {circle.timeline.length === 0 ? (
               <View style={styles.empty}>
@@ -1798,6 +975,68 @@ export default function CircleDetailScreen() {
                 <Text style={[styles.budgetTotalValue, { color: colors.foreground }]}>
                   ${totalSpent.toFixed(2)}
                 </Text>
+              </View>
+            )}
+
+            {/* ── Split summary ───────────────────────────────────────── */}
+            {circle.budget.length > 0 && circle.members.length > 1 && (
+              <View style={[styles.splitCard, { backgroundColor: colors.card, borderColor: colors.border, borderRadius: colors.radius - 4 }]}>
+                <View style={styles.splitHeader}>
+                  <Feather name="users" size={14} color={colors.primary} />
+                  <Text style={[styles.splitTitle, { color: colors.foreground }]}>Split</Text>
+                  <Text style={[styles.splitShare, { color: colors.mutedForeground }]}>
+                    ${(totalSpent / circle.members.length).toFixed(2)} / person
+                  </Text>
+                </View>
+
+                {/* Per-member paid vs share */}
+                {circle.members.map((m) => {
+                  const paid = circle.budget
+                    .filter((b) => b.paidBy === m.userId)
+                    .reduce((s, b) => s + b.amount, 0);
+                  const fairShare = totalSpent / circle.members.length;
+                  const diff = paid - fairShare;
+                  const isEven = Math.abs(diff) < 0.005;
+                  return (
+                    <View key={m.userId} style={styles.splitMemberRow}>
+                      <Text style={[styles.splitMemberName, { color: colors.foreground }]} numberOfLines={1}>
+                        {m.nickname}
+                      </Text>
+                      <Text style={[styles.splitMemberPaid, { color: colors.mutedForeground }]}>
+                        paid ${paid.toFixed(2)}
+                      </Text>
+                      <Text style={[
+                        styles.splitMemberDiff,
+                        { color: isEven ? colors.mutedForeground : diff > 0 ? "#22c55e" : colors.destructive }
+                      ]}>
+                        {isEven ? "even" : diff > 0 ? `+$${diff.toFixed(2)}` : `-$${Math.abs(diff).toFixed(2)}`}
+                      </Text>
+                    </View>
+                  );
+                })}
+
+                {/* Settlement suggestions */}
+                {splitSettlements.length > 0 && (
+                  <View style={[styles.splitSettleSection, { borderTopColor: colors.border }]}>
+                    <Text style={[styles.splitSettleLabel, { color: colors.mutedForeground }]}>
+                      To settle up
+                    </Text>
+                    {splitSettlements.map((s, idx) => (
+                      <View key={idx} style={styles.splitSettleRow}>
+                        <Text style={[styles.splitSettleName, { color: colors.foreground }]}>
+                          {memberNickname(s.from)}
+                        </Text>
+                        <Feather name="arrow-right" size={12} color={colors.mutedForeground} />
+                        <Text style={[styles.splitSettleName, { color: colors.foreground }]}>
+                          {memberNickname(s.to)}
+                        </Text>
+                        <Text style={[styles.splitSettleAmount, { color: colors.foreground }]}>
+                          ${s.amount.toFixed(2)}
+                        </Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
               </View>
             )}
 
@@ -2251,181 +1490,11 @@ const styles = StyleSheet.create({
   tab: { flex: 1, alignItems: "center", paddingVertical: 12 },
   tabText: { fontFamily: "Inter_600SemiBold", fontSize: 12 },
   section: { padding: 16, gap: 12 },
-  // composer
-  composer: { borderWidth: 1, overflow: "hidden", gap: 0 },
-  composerToggle: { flexDirection: "row", margin: 12, padding: 4, gap: 4 },
-  composerToggleBtn: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    paddingVertical: 8,
-  },
-  composerToggleText: { fontFamily: "Inter_600SemiBold", fontSize: 13 },
-  eventFields: { paddingHorizontal: 14, gap: 8 },
-  eventFieldRow: { flexDirection: "row", gap: 12 },
-  composerInput: {
-    fontSize: 15,
-    minHeight: 60,
-    paddingHorizontal: 14,
-    paddingTop: 12,
-    lineHeight: 22,
-    borderTopWidth: 1,
-  },
-  imagePreviewRow: {
-    flexDirection: "row",
-    gap: 8,
-    paddingHorizontal: 14,
-    flexWrap: "wrap",
-  },
-  imagePreviewWrap: { position: "relative" },
-  imagePreview: { width: 72, height: 72 },
-  removeImg: {
-    position: "absolute",
-    top: -6,
-    right: -6,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  composerBar: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderTopWidth: 1,
-  },
-  composerBarBtn: { padding: 4 },
-  postBtn: { paddingHorizontal: 18, paddingVertical: 8 },
-  postBtnText: { fontFamily: "Inter_600SemiBold", fontSize: 14 },
-  // gate
-  gateSafeTop: {
-    flexGrow: 1,
-    justifyContent: "center",
-    paddingHorizontal: 24,
-    paddingTop: 12,
-  },
-  gateBack: { paddingHorizontal: 20, paddingVertical: 4 },
   catLabel: {
     fontFamily: "Inter_500Medium",
     fontSize: 12,
     letterSpacing: 1,
   },
-  gateLockWrap: { alignItems: "center", paddingTop: 32, paddingBottom: 24, gap: 10 },
-  gateLockCircle: {
-    width: 72, height: 72, borderRadius: 36,
-    backgroundColor: "#ffffff20",
-    alignItems: "center", justifyContent: "center",
-  },
-  gateCircleName: {
-    fontFamily: "Inter_700Bold", fontSize: 26, color: "#fff", textAlign: "center", paddingHorizontal: 24,
-  },
-  gateSubtitle: { fontFamily: "Inter_400Regular", fontSize: 15, color: "#ffffff80" },
-  gateCard: {
-    marginHorizontal: 24, borderRadius: 14, borderWidth: 1,
-    padding: 20, gap: 8, marginBottom: 20,
-  },
-  gateQuestionLabel: {
-    fontFamily: "Inter_600SemiBold", fontSize: 11, color: "#FFD166",
-    textTransform: "uppercase", letterSpacing: 1,
-  },
-  gateQuestion: { fontFamily: "Inter_600SemiBold", fontSize: 18, color: "#fff", lineHeight: 26 },
-  gateInputWrap: { marginHorizontal: 24, marginBottom: 16, gap: 8 },
-  gateInput: {
-    fontFamily: "Inter_400Regular", fontSize: 16,
-    borderWidth: 1.5, borderRadius: 12,
-    paddingHorizontal: 16, paddingVertical: 14, color: "#fff",
-  },
-  gateError: { fontFamily: "Inter_400Regular", fontSize: 13, color: "#FF5C5C" },
-  // entry card
-  entryCard: { borderWidth: 1, overflow: "hidden" },
-  editArea: { borderTopWidth: 1, padding: 12, gap: 8 },
-  editField: { borderWidth: 1, borderRadius: 8, padding: 10, minHeight: 60, fontSize: 14 },
-  editActions: { flexDirection: "row", gap: 8, justifyContent: "flex-end" },
-  editBtn: { paddingHorizontal: 16, paddingVertical: 8 },
-  editBtnText: { fontFamily: "Inter_600SemiBold", fontSize: 14 },
-  eventBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-  },
-  eventBadgeText: { fontFamily: "Inter_600SemiBold", fontSize: 13 },
-  entryHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    padding: 14,
-    paddingBottom: 8,
-  },
-  entryAvatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  entryAvatarText: { fontFamily: "Inter_700Bold", fontSize: 14 },
-  entryAuthor: { fontFamily: "Inter_600SemiBold", fontSize: 14 },
-  entryTime: { fontFamily: "Inter_400Regular", fontSize: 12, marginTop: 1 },
-  entryCaption: {
-    fontFamily: "Inter_400Regular",
-    fontSize: 15,
-    lineHeight: 22,
-    paddingHorizontal: 14,
-    paddingBottom: 10,
-  },
-  imageRow: { paddingHorizontal: 14, paddingBottom: 10 },
-  entryImage: { width: 200, height: 180, marginRight: 8 },
-  entryActions: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 14,
-    paddingHorizontal: 14,
-    paddingBottom: 12,
-  },
-  actionBtn: { flexDirection: "row", alignItems: "center", gap: 5 },
-  reactionEmoji: { fontSize: 20 },
-  actionCount: { fontFamily: "Inter_500Medium", fontSize: 13 },
-  reactionChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-  },
-  reactionPicker: {
-    flexDirection: "row",
-    justifyContent: "space-around",
-    paddingVertical: 10,
-    borderTopWidth: 1,
-  },
-  reactionOption: { padding: 4 },
-  commentsArea: { borderTopWidth: 1, padding: 14, gap: 10 },
-  comment: { flexDirection: "row", alignItems: "flex-end", gap: 8 },
-  commentAvatar: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  commentAvatarText: { fontFamily: "Inter_600SemiBold", fontSize: 11 },
-  commentBubble: { flex: 1, paddingHorizontal: 12, paddingVertical: 8 },
-  commentText: { fontFamily: "Inter_400Regular", fontSize: 14, lineHeight: 20 },
-  commentInputRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    borderTopWidth: 1,
-    paddingTop: 10,
-  },
-  commentField: { flex: 1, fontSize: 14 },
   // itinerary
   dayLabel: { fontFamily: "Inter_700Bold", fontSize: 16, marginBottom: 4 },
   itineraryRow: {
@@ -2503,6 +1572,20 @@ const styles = StyleSheet.create({
   },
   budgetTotalLabel: { fontFamily: "Inter_500Medium", fontSize: 15 },
   budgetTotalValue: { fontFamily: "Inter_700Bold", fontSize: 18 },
+  // split
+  splitCard: { borderWidth: 1, padding: 14, gap: 10, marginTop: 4 },
+  splitHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
+  splitTitle: { fontFamily: "Inter_600SemiBold", fontSize: 14, flex: 1 },
+  splitShare: { fontFamily: "Inter_400Regular", fontSize: 13 },
+  splitMemberRow: { flexDirection: "row", alignItems: "center", gap: 8 },
+  splitMemberName: { fontFamily: "Inter_500Medium", fontSize: 13, flex: 1 },
+  splitMemberPaid: { fontFamily: "Inter_400Regular", fontSize: 12 },
+  splitMemberDiff: { fontFamily: "Inter_600SemiBold", fontSize: 13, minWidth: 56, textAlign: "right" },
+  splitSettleSection: { borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 10, gap: 8 },
+  splitSettleLabel: { fontFamily: "Inter_500Medium", fontSize: 11, textTransform: "uppercase", letterSpacing: 0.6 },
+  splitSettleRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  splitSettleName: { fontFamily: "Inter_500Medium", fontSize: 13 },
+  splitSettleAmount: { fontFamily: "Inter_700Bold", fontSize: 13, marginLeft: "auto" as any },
   // members
   shareInviteCard: {
     flexDirection: "row",

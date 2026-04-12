@@ -17,6 +17,16 @@ import { Input } from "@/components/ui/Input";
 import { useApp } from "@/context/AppContext";
 import { useColors } from "@/hooks/useColors";
 
+/** Validate and parse "YYYY-MM-DD" format. Returns a Date or null. */
+function parseYMD(s: string): Date | null {
+  if (!s) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s.trim())) return null;
+  const [y, m, d] = s.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return null;
+  return dt;
+}
+
 export default function CreateTripScreen() {
   const colors = useColors();
   const router = useRouter();
@@ -35,8 +45,21 @@ export default function CreateTripScreen() {
     const e: Record<string, string> = {};
     if (!title.trim()) e.title = "Give the trip a name";
     if (!destination.trim()) e.destination = "Where are you going?";
-    if (!startDate.trim()) e.startDate = "When does it start?";
-    if (!endDate.trim()) e.endDate = "When does it end?";
+    if (!startDate.trim()) {
+      e.startDate = "When does it start?";
+    } else if (!parseYMD(startDate)) {
+      e.startDate = "Use YYYY-MM-DD format (e.g. 2025-06-15)";
+    }
+    if (!endDate.trim()) {
+      e.endDate = "When does it end?";
+    } else if (!parseYMD(endDate)) {
+      e.endDate = "Use YYYY-MM-DD format (e.g. 2025-06-20)";
+    }
+    if (!e.startDate && !e.endDate) {
+      const s = parseYMD(startDate);
+      const en = parseYMD(endDate);
+      if (s && en && en < s) e.endDate = "End date must be after start date";
+    }
     return e;
   };
 
@@ -49,7 +72,7 @@ export default function CreateTripScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
 
     const now = new Date();
-    const start = new Date(startDate);
+    const start = parseYMD(startDate)!;
     const status = now < start ? "upcoming" : "active";
 
     const id = Date.now().toString() + Math.random().toString(36).substr(2, 6);

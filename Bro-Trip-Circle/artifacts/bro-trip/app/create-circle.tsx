@@ -79,6 +79,11 @@ export default function CreateCircleScreen() {
     if (!nickname.trim()) e.nickname = "What should your crew call you in this circle?";
     if (startDate && !parseMDY(startDate)) e.startDate = "Use MM/DD/YYYY format (e.g. 07/01/2025)";
     if (endDate && !parseMDY(endDate)) e.endDate = "Use MM/DD/YYYY format (e.g. 07/05/2025)";
+    if (!e.startDate && !e.endDate && startDate && endDate) {
+      const s = parseMDY(startDate);
+      const en = parseMDY(endDate);
+      if (s && en && en < s) e.endDate = "End date must be after start date";
+    }
     setErrors(e);
     if (Object.keys(e).length === 0) setStep("questions");
   };

@@ -24,17 +24,16 @@ const STORAGE_KEYS = {
 const PENALTIES = {
   wrongAnswer: 2,
   timeout: 3,
-  slowCorrect: 1,
-  correct: 1,
-  fastCorrectBonus: 1,
-  milestoneBonus: 2,
+  correct: 2,          // base score reduction per correct answer (was 1, too slow)
+  fastCorrectBonus: 1, // extra -1 if answered with ≥40% timer remaining
+  milestoneBonus: 3,   // extra -3 after 3 spaced correct entries
 };
 
 const LIMITS = {
   consecutiveFailuresToLock: 5,
   cooldownMinutes: 1,
   reentryCodeMinutes: 10,
-  recoverySpacingMinutes: 60,
+  recoverySpacingMinutes: 10, // was 60 — milestone now reachable after 3 entries 10+ min apart
   recoveryMilestoneSuccesses: 3,
   storedSuccesses: 10,
 };
@@ -200,14 +199,12 @@ export function applyTimeout(inputState: AuthRiskState): AuthRiskState {
   state = {
     ...state,
     suspicionScore: state.suspicionScore + PENALTIES.timeout,
-    consecutiveFailures: state.consecutiveFailures + 1,
+    // Timeouts raise suspicion score but don't count as consecutive failures —
+    // failing to answer in time is not the same as answering wrong.
     lastAttemptAt: nowIso(),
   };
 
-  if (
-    state.consecutiveFailures >= LIMITS.consecutiveFailuresToLock ||
-    state.suspicionScore >= THRESHOLDS.critical
-  ) {
+  if (state.suspicionScore >= THRESHOLDS.critical) {
     state = lockState(state);
   }
 
@@ -219,20 +216,16 @@ export function applyCorrectAnswer(
   timing?: { remainingSecs?: number; totalSecs?: number }
 ): AuthRiskState {
   let state = normalizeState(inputState);
-  let score = state.suspicionScore - PENALTIES.correct;
+  let score = state.suspicionScore - PENALTIES.correct; // always -2
 
   const totalSecs = timing?.totalSecs ?? 0;
   const remainingSecs = timing?.remainingSecs ?? 0;
 
   if (totalSecs > 0) {
     const remainingRatio = remainingSecs / totalSecs;
-
-    if (remainingRatio <= 0.2) {
-      score += PENALTIES.slowCorrect;
-    }
-
+    // Bonus only for fast answers — no slow penalty (correct is correct)
     if (remainingRatio >= 0.4) {
-      score -= PENALTIES.fastCorrectBonus;
+      score -= PENALTIES.fastCorrectBonus; // extra -1
     }
   }
 
