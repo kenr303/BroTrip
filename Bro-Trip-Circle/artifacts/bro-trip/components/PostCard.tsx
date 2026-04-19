@@ -13,22 +13,13 @@ import {
 import * as Haptics from "expo-haptics";
 import { useColors } from "@/hooks/useColors";
 import { useApp, Post } from "@/context/AppContext";
+import { timeAgo } from "@/lib/dateUtils";
 
 const REACTION_EMOJIS = ["🔥", "😂", "❤️", "🤙", "💀", "🙌"];
 
 interface PostCardProps {
   post: Post;
   compact?: boolean;
-}
-
-function timeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const min = Math.floor(diff / 60000);
-  if (min < 1) return "just now";
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  return `${Math.floor(hr / 24)}d ago`;
 }
 
 export function PostCard({ post, compact = false }: PostCardProps) {

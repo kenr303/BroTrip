@@ -4,6 +4,7 @@ import React, { useState } from "react";
 import {
   Alert,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -28,69 +29,14 @@ import { useColors } from "@/hooks/useColors";
 import { EntryCard } from "@/components/circle/EntryCard";
 import { TimelineComposer } from "@/components/circle/TimelineComposer";
 import { VerificationGate } from "@/components/circle/VerificationGate";
+import { timeAgo, isValidTime, timeToMinutes, activityDate } from "@/lib/dateUtils";
 
 function uid() {
   return Date.now().toString() + Math.random().toString(36).substr(2, 6);
 }
 
-function timeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const min = Math.floor(diff / 60000);
-  if (min < 1) return "just now";
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  return `${Math.floor(hr / 24)}d ago`;
-}
-
-/** Validate "HH:MM AM/PM" time format */
-function isValidTime(t: string): boolean {
-  return /^(0?[1-9]|1[0-2]):\d{2}\s?(AM|PM)$/i.test(t.trim());
-}
-
-/** Convert "H:MM AM/PM" to minutes since midnight for reliable numeric sorting. */
-function timeToMinutes(t: string): number {
-  const match = t.trim().match(/^(\d{1,2}):(\d{2})\s?(AM|PM)$/i);
-  if (!match) return 0;
-  let h = parseInt(match[1]);
-  const m = parseInt(match[2]);
-  const meridiem = match[3].toUpperCase();
-  if (meridiem === "AM" && h === 12) h = 0;
-  if (meridiem === "PM" && h !== 12) h += 12;
-  return h * 60 + m;
-}
-
-/** Validate "MM/DD/YYYY" date format */
-function isValidDate(d: string): boolean {
-  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(d.trim())) return false;
-  const [m, day, y] = d.split("/").map(Number);
-  const dt = new Date(y, m - 1, day);
-  return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === day;
-}
-
-/**
- * Compute actual Date for an activity given the circle's trip start date,
- * the day number (1-based), and the time string ("HH:MM AM/PM").
- * Falls back to now if parsing fails.
- */
-function activityDate(startDateStr: string, dayNum: number, timeStr: string): Date {
-  const fallback = new Date();
-  if (!startDateStr || !isValidDate(startDateStr)) return fallback;
-  const [m, d, y] = startDateStr.split("/").map(Number);
-  const base = new Date(y, m - 1, d + (dayNum - 1));
-  if (timeStr && isValidTime(timeStr)) {
-    const match = timeStr.trim().match(/^(\d{1,2}):(\d{2})\s?(AM|PM)$/i);
-    if (match) {
-      let hours = parseInt(match[1]);
-      const mins = parseInt(match[2]);
-      const ampm = match[3].toUpperCase();
-      if (ampm === "PM" && hours < 12) hours += 12;
-      if (ampm === "AM" && hours === 12) hours = 0;
-      base.setHours(hours, mins, 0, 0);
-    }
-  }
-  return base;
-}
+// Persists across navigation for the lifetime of the app session
+const verifiedThisSession = new Set<string>();
 
 const BUDGET_ICONS: Record<string, string> = {
   transport: "truck",
@@ -117,6 +63,7 @@ interface ActivityFormState {
   notes: string;
   expenseAmount: string;
   expenseCategory: typeof BUDGET_CATEGORIES[number];
+  expensePaidBy: string;
   postToTimeline: boolean;
 }
 
@@ -128,6 +75,7 @@ function blankForm(): ActivityFormState {
     notes: "",
     expenseAmount: "",
     expenseCategory: "activities",
+    expensePaidBy: "",
     postToTimeline: true,
   };
 }
@@ -140,7 +88,8 @@ function formFromItem(item: ItineraryItem): ActivityFormState {
     notes: item.notes,
     expenseAmount: item.expenseAmount ? String(item.expenseAmount) : "",
     expenseCategory: item.expenseCategory ?? "activities",
-    postToTimeline: false, // don't re-post on edit by default
+    expensePaidBy: "",
+    postToTimeline: false,
   };
 }
 
@@ -163,14 +112,20 @@ export default function CircleDetailScreen() {
     addQuestion,
     removeQuestion,
     updateNickname,
+    updateCircle,
     approveJoin,
     rejectJoin,
+    removeMember,
+    initiateDeleteVote,
+    castDeleteVote,
+    cancelDeleteVote,
+    deleteCircle,
   } = useApp();
 
   const circle = circles.find((c) => c.id === id);
   const [activeTab, setActiveTab] = useState<Tab>("timeline");
 
-  const [verified, setVerified] = useState(false);
+  const [verified, setVerified] = useState(() => verifiedThisSession.has(id));
 
   const [composerOpen, setComposerOpen] = useState(false);
 
@@ -188,6 +143,18 @@ export default function CircleDetailScreen() {
   const [budgetAmount, setBudgetAmount] = useState("");
   const [budgetCategory, setBudgetCategory] =
     useState<typeof BUDGET_CATEGORIES[number]>("food");
+  const [budgetPaidBy, setBudgetPaidBy] = useState("");
+  const [editingTotalBudget, setEditingTotalBudget] = useState(false);
+  const [totalBudgetInput, setTotalBudgetInput] = useState("");
+
+  // Edit circle details
+  const [showEditCircle, setShowEditCircle] = useState(false);
+  const [editCircleName, setEditCircleName] = useState("");
+  const [editCircleDestination, setEditCircleDestination] = useState("");
+  const [editCircleDescription, setEditCircleDescription] = useState("");
+  const [editCircleStartDate, setEditCircleStartDate] = useState("");
+  const [editCircleEndDate, setEditCircleEndDate] = useState("");
+  const [savingCircleEdit, setSavingCircleEdit] = useState(false);
 
   // Members / questions
   const [showAddQ, setShowAddQ] = useState(false);
@@ -210,12 +177,91 @@ export default function CircleDetailScreen() {
     );
   }
 
-  if (!verified) return <VerificationGate circleId={id} onVerified={() => setVerified(true)} onBack={() => router.back()} />;
+  if (!verified) return <VerificationGate circleId={id} onVerified={() => { verifiedThisSession.add(id); setVerified(true); }} onBack={() => router.back()} />;
 
   const myMember = circle.members.find((m) => m.userId === currentUser?.id);
   const myNickname = myMember?.nickname || currentUser?.name || "";
+  const isCreator = circle.createdBy === currentUser?.id;
   const memberNickname = (userId: string) =>
     circle.members.find((m) => m.userId === userId)?.nickname || userId;
+
+  // Delete vote helpers
+  const deleteResponses = circle.deleteResponses ?? [];
+  const deleteDeadline = circle.deleteInitiatedAt
+    ? new Date(new Date(circle.deleteInitiatedAt).getTime() + 7 * 24 * 60 * 60 * 1000)
+    : null;
+  const isPastDeadline = deleteDeadline ? new Date() > deleteDeadline : false;
+  const yesVotes = deleteResponses.filter((r) => r.vote === "yes").length;
+  const noVotes = deleteResponses.filter((r) => r.vote === "no").length;
+  const notVoted = circle.members.length - deleteResponses.length;
+  const effectiveYes = isPastDeadline ? yesVotes + notVoted : yesVotes;
+  const deleteApproved = effectiveYes > circle.members.length * 0.5;
+  const myVote = deleteResponses.find((r) => r.userId === currentUser?.id)?.vote ?? null;
+
+  const handleInitiateDelete = () => {
+    Alert.alert(
+      "Start Deletion Vote?",
+      `All ${circle.members.length} members will be notified and asked to vote. If more than 50% vote yes (or don't respond within 7 days), the circle will be permanently deleted.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Start Vote", style: "destructive", onPress: () => initiateDeleteVote(circle.id) },
+      ]
+    );
+  };
+
+  const handleDeleteApproved = () => {
+    Alert.alert(
+      "Delete Circle",
+      "Vote passed. This will permanently delete the circle and all its data.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete Forever",
+          style: "destructive",
+          onPress: async () => {
+            await deleteCircle(circle.id);
+            router.replace("/(tabs)/");
+          },
+        },
+      ]
+    );
+  };
+
+  const openEditCircle = () => {
+    // Pre-fill with current values; convert ISO dates to MM/DD/YYYY for display
+    const toMDY = (iso: string) => {
+      if (!iso) return "";
+      const d = new Date(iso);
+      return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`;
+    };
+    setEditCircleName(circle.name);
+    setEditCircleDestination(circle.destination);
+    setEditCircleDescription(circle.description);
+    setEditCircleStartDate(toMDY(circle.startDate));
+    setEditCircleEndDate(toMDY(circle.endDate));
+    setShowEditCircle(true);
+  };
+
+  const handleSaveCircleEdit = async () => {
+    if (!editCircleName.trim()) return;
+    setSavingCircleEdit(true);
+    const parseMDY = (s: string) => {
+      if (!s.trim()) return "";
+      const [m, d, y] = s.split("/");
+      if (!m || !d || !y) return s;
+      return new Date(Number(y), Number(m) - 1, Number(d)).toISOString();
+    };
+    await updateCircle(circle.id, {
+      name: editCircleName.trim(),
+      destination: editCircleDestination.trim(),
+      description: editCircleDescription.trim(),
+      startDate: parseMDY(editCircleStartDate),
+      endDate: parseMDY(editCircleEndDate),
+    });
+    setSavingCircleEdit(false);
+    setShowEditCircle(false);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  };
 
   const totalSpent = circle.budget.reduce((s, b) => s + b.amount, 0);
   const budgetPct =
@@ -270,7 +316,7 @@ export default function CircleDetailScreen() {
 
     const budgetItemId = expenseAmount ? uid() : undefined;
     const budgetItem: BudgetItem | undefined = expenseAmount && currentUser
-      ? { id: budgetItemId!, title, amount: expenseAmount, paidBy: currentUser.id, category: addForm.expenseCategory, date: new Date().toISOString() }
+      ? { id: budgetItemId!, title, amount: expenseAmount, paidBy: addForm.expensePaidBy || currentUser.id, category: addForm.expenseCategory, date: new Date().toISOString() }
       : undefined;
 
     const timelineEntryId = addForm.postToTimeline ? uid() : undefined;
@@ -337,7 +383,7 @@ export default function CircleDetailScreen() {
       removeBudgetItemId = item.expenseBudgetItemId;
       if (newAmount > 0 && currentUser) {
         expenseBudgetItemId = uid();
-        newBudgetItem = { id: expenseBudgetItemId, title, amount: newAmount, paidBy: currentUser.id, category: f.expenseCategory, date: new Date().toISOString() };
+        newBudgetItem = { id: expenseBudgetItemId, title, amount: newAmount, paidBy: f.expensePaidBy || currentUser.id, category: f.expenseCategory, date: new Date().toISOString() };
       } else {
         expenseBudgetItemId = undefined;
       }
@@ -394,7 +440,7 @@ export default function CircleDetailScreen() {
       id: uid(),
       title: budgetTitle.trim(),
       amount: parseFloat(budgetAmount) || 0,
-      paidBy: currentUser?.id || "",
+      paidBy: budgetPaidBy || currentUser?.id || "",
       category: budgetCategory,
       date: new Date().toISOString(),
     };
@@ -402,6 +448,7 @@ export default function CircleDetailScreen() {
     setBudgetTitle("");
     setBudgetAmount("");
     setBudgetCategory("food");
+    setBudgetPaidBy("");
     setShowAddBudget(false);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
   };
@@ -543,39 +590,56 @@ export default function CircleDetailScreen() {
           keyboardType="decimal-pad"
         />
         {!!f.expenseAmount && (
-          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-            {BUDGET_CATEGORIES.map((cat) => (
-              <Pressable
-                key={cat}
-                onPress={() => setF({ ...f, expenseCategory: cat })}
-                style={[
-                  styles.catChip,
-                  {
-                    backgroundColor:
-                      f.expenseCategory === cat ? colors.primary : colors.card,
-                    borderRadius: 12,
-                  },
-                ]}
-              >
-                <Feather
-                  name={BUDGET_ICONS[cat] as any}
-                  size={13}
-                  color={f.expenseCategory === cat ? "#fff" : colors.mutedForeground}
-                />
-                <Text
+          <>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              {BUDGET_CATEGORIES.map((cat) => (
+                <Pressable
+                  key={cat}
+                  onPress={() => setF({ ...f, expenseCategory: cat })}
                   style={[
-                    styles.catChipText,
+                    styles.catChip,
                     {
-                      color:
-                        f.expenseCategory === cat ? "#fff" : colors.mutedForeground,
+                      backgroundColor:
+                        f.expenseCategory === cat ? colors.primary : colors.card,
+                      borderRadius: 12,
                     },
                   ]}
                 >
-                  {cat.charAt(0).toUpperCase() + cat.slice(1)}
-                </Text>
-              </Pressable>
-            ))}
-          </ScrollView>
+                  <Feather
+                    name={BUDGET_ICONS[cat] as any}
+                    size={13}
+                    color={f.expenseCategory === cat ? "#fff" : colors.mutedForeground}
+                  />
+                  <Text
+                    style={[
+                      styles.catChipText,
+                      { color: f.expenseCategory === cat ? "#fff" : colors.mutedForeground },
+                    ]}
+                  >
+                    {cat.charAt(0).toUpperCase() + cat.slice(1)}
+                  </Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+
+            <Text style={[styles.catLabel, { color: colors.mutedForeground, marginTop: 6 }]}>PAID BY</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              {circle.members.map((m) => {
+                const selected = (f.expensePaidBy || currentUser?.id) === m.userId;
+                return (
+                  <Pressable
+                    key={m.userId}
+                    onPress={() => setF({ ...f, expensePaidBy: m.userId })}
+                    style={[styles.catChip, { backgroundColor: selected ? colors.primary : colors.card, borderRadius: 12 }]}
+                  >
+                    <Text style={[styles.catChipText, { color: selected ? "#fff" : colors.mutedForeground }]}>
+                      {m.nickname}{m.userId === currentUser?.id ? " (you)" : ""}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          </>
         )}
       </View>
 
@@ -645,6 +709,14 @@ export default function CircleDetailScreen() {
         >
           <Feather name="share" size={17} color={colors.foreground} />
         </Pressable>
+        {isCreator && (
+          <Pressable
+            onPress={openEditCircle}
+            style={[styles.navBtn, { backgroundColor: colors.muted, borderRadius: 22 }]}
+          >
+            <Feather name="settings" size={17} color={colors.foreground} />
+          </Pressable>
+        )}
         {activeTab === "timeline" && (
           <Pressable
             onPress={() => setComposerOpen((v) => !v)}
@@ -654,22 +726,6 @@ export default function CircleDetailScreen() {
           </Pressable>
         )}
       </View>
-
-      {/* Invite code banner */}
-      <Pressable
-        onPress={handleShareInvite}
-        style={[styles.inviteBanner, { backgroundColor: colors.navy }]}
-      >
-        <Feather name="link" size={13} color={colors.primary} />
-        <Text style={styles.inviteLabel}>Invite code:</Text>
-        <Text style={styles.inviteCode}>{circle.inviteCode}</Text>
-        <Text style={styles.inviteMembers}>
-          {circle.members.length} member{circle.members.length !== 1 ? "s" : ""}
-        </Text>
-        <View style={[styles.shareChip, { backgroundColor: colors.primary + "25", borderRadius: 10 }]}>
-          <Text style={[styles.shareChipText, { color: colors.primary }]}>Tap to share</Text>
-        </View>
-      </Pressable>
 
       {/* Tab bar */}
       <View style={[styles.tabBar, { borderBottomColor: colors.border }]}>
@@ -702,6 +758,50 @@ export default function CircleDetailScreen() {
           </Pressable>
         ))}
       </View>
+
+      {/* ── Delete vote banner ───────────────────────────────────── */}
+      {circle.deleteInitiatedAt && (
+        <View style={[styles.voteBanner, { backgroundColor: colors.destructive + "18", borderColor: colors.destructive + "40" }]}>
+          <View style={styles.voteBannerTop}>
+            <Feather name="alert-triangle" size={15} color={colors.destructive} />
+            <Text style={[styles.voteBannerTitle, { color: colors.destructive }]}>
+              Deletion Vote In Progress
+            </Text>
+          </View>
+          <Text style={[styles.voteBannerSub, { color: colors.mutedForeground }]}>
+            {deleteApproved
+              ? "Vote passed — circle can now be deleted."
+              : `${effectiveYes} of ${circle.members.length} yes · Deadline: ${deleteDeadline?.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`}
+          </Text>
+          {deleteApproved && isCreator ? (
+            <Pressable
+              onPress={handleDeleteApproved}
+              style={[styles.voteBannerBtn, { backgroundColor: colors.destructive }]}
+            >
+              <Text style={styles.voteBannerBtnText}>Delete Circle Forever</Text>
+            </Pressable>
+          ) : !myVote && !isCreator ? (
+            <View style={styles.voteButtons}>
+              <Pressable
+                onPress={() => castDeleteVote(circle.id, "yes")}
+                style={[styles.voteBtn, { backgroundColor: colors.destructive + "20", borderColor: colors.destructive + "60" }]}
+              >
+                <Text style={[styles.voteBtnText, { color: colors.destructive }]}>Yes, Delete</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => castDeleteVote(circle.id, "no")}
+                style={[styles.voteBtn, { backgroundColor: colors.success + "20", borderColor: colors.success + "60" }]}
+              >
+                <Text style={[styles.voteBtnText, { color: colors.success }]}>No, Keep It</Text>
+              </Pressable>
+            </View>
+          ) : myVote ? (
+            <Text style={[styles.votedLabel, { color: colors.mutedForeground }]}>
+              You voted: <Text style={{ color: myVote === "yes" ? colors.destructive : colors.success, fontFamily: "Inter_600SemiBold" }}>{myVote === "yes" ? "Yes, delete" : "No, keep it"}</Text>
+            </Text>
+          ) : null}
+        </View>
+      )}
 
       <ScrollView
         contentContainerStyle={{
@@ -907,9 +1007,84 @@ export default function CircleDetailScreen() {
                   <Text style={styles.budgetSummaryRemaining}>
                     Remaining: ${Math.max(0, circle.totalBudget - totalSpent).toFixed(2)}
                   </Text>
-                  <Text style={styles.budgetSummaryTotal}>
-                    Budget: ${circle.totalBudget}
-                  </Text>
+                  {isCreator && editingTotalBudget ? (
+                    <View style={styles.budgetEditRow}>
+                      <Input
+                        value={totalBudgetInput}
+                        onChangeText={setTotalBudgetInput}
+                        keyboardType="decimal-pad"
+                        placeholder="0"
+                        style={styles.budgetEditInput}
+                      />
+                      <Pressable
+                        onPress={async () => {
+                          const val = parseFloat(totalBudgetInput);
+                          if (!isNaN(val) && val >= 0) {
+                            await updateCircle(circle.id, { totalBudget: val });
+                            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                          }
+                          setEditingTotalBudget(false);
+                        }}
+                        style={[styles.budgetEditSave, { backgroundColor: colors.primary }]}
+                      >
+                        <Feather name="check" size={14} color="#fff" />
+                      </Pressable>
+                      <Pressable onPress={() => setEditingTotalBudget(false)}>
+                        <Feather name="x" size={16} color="rgba(255,255,255,0.6)" />
+                      </Pressable>
+                    </View>
+                  ) : (
+                    <Pressable
+                      onPress={isCreator ? () => { setTotalBudgetInput(String(circle.totalBudget)); setEditingTotalBudget(true); } : undefined}
+                      style={styles.budgetTotalPressable}
+                    >
+                      <Text style={styles.budgetSummaryTotal}>
+                        Budget: ${circle.totalBudget}
+                      </Text>
+                      {isCreator && <Feather name="edit-2" size={11} color="rgba(255,255,255,0.45)" style={{ marginLeft: 5 }} />}
+                    </Pressable>
+                  )}
+                </View>
+              </View>
+            )}
+
+            {/* No budget set yet — creator can set one */}
+            {circle.totalBudget === 0 && isCreator && !editingTotalBudget && (
+              <Pressable
+                onPress={() => { setTotalBudgetInput(""); setEditingTotalBudget(true); }}
+                style={[styles.setBudgetBtn, { borderColor: colors.primary + "50", borderRadius: colors.radius - 4 }]}
+              >
+                <Feather name="dollar-sign" size={15} color={colors.primary} />
+                <Text style={[styles.setBudgetText, { color: colors.primary }]}>Set Trip Budget</Text>
+              </Pressable>
+            )}
+            {circle.totalBudget === 0 && isCreator && editingTotalBudget && (
+              <View style={[styles.setBudgetCard, { backgroundColor: colors.card, borderColor: colors.border, borderRadius: colors.radius - 4 }]}>
+                <Text style={[styles.setBudgetCardLabel, { color: colors.foreground }]}>Total Trip Budget ($)</Text>
+                <View style={styles.budgetEditRow}>
+                  <Input
+                    value={totalBudgetInput}
+                    onChangeText={setTotalBudgetInput}
+                    keyboardType="decimal-pad"
+                    placeholder="e.g. 2000"
+                    style={{ flex: 1 }}
+                  />
+                  <Pressable
+                    onPress={async () => {
+                      const val = parseFloat(totalBudgetInput);
+                      if (!isNaN(val) && val > 0) {
+                        await updateCircle(circle.id, { totalBudget: val });
+                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                      }
+                      setEditingTotalBudget(false);
+                    }}
+                    style={[styles.budgetEditSave, { backgroundColor: colors.primary }]}
+                  >
+                    <Feather name="check" size={14} color="#fff" />
+                  </Pressable>
+                  <Pressable onPress={() => setEditingTotalBudget(false)}>
+                    <Feather name="x" size={16} color={colors.mutedForeground} />
+                  </Pressable>
                 </View>
               </View>
             )}
@@ -1097,6 +1272,26 @@ export default function CircleDetailScreen() {
                     </Pressable>
                   ))}
                 </ScrollView>
+
+                {/* Paid by */}
+                <Text style={[styles.catLabel, { color: colors.mutedForeground }]}>PAID BY</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                  {circle.members.map((m) => {
+                    const selected = (budgetPaidBy || currentUser?.id) === m.userId;
+                    return (
+                      <Pressable
+                        key={m.userId}
+                        onPress={() => setBudgetPaidBy(m.userId)}
+                        style={[styles.catChip, { backgroundColor: selected ? colors.primary : colors.muted, borderRadius: 12 }]}
+                      >
+                        <Text style={[styles.catChipText, { color: selected ? "#fff" : colors.mutedForeground }]}>
+                          {m.nickname}{m.userId === currentUser?.id ? " (you)" : ""}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+
                 <View style={styles.addFormActions}>
                   <Button
                     label="Cancel"
@@ -1294,11 +1489,31 @@ export default function CircleDetailScreen() {
                     {timeAgo(m.joinedAt)}
                   </Text>
                 </View>
-                {m.userId === currentUser?.id && (
+                {m.userId === currentUser?.id ? (
                   <View style={[styles.youBadge, { backgroundColor: colors.primary + "15", borderRadius: 8 }]}>
                     <Text style={[styles.youBadgeText, { color: colors.primary }]}>You</Text>
                   </View>
-                )}
+                ) : isCreator ? (
+                  <Pressable
+                    onPress={() =>
+                      Alert.alert(
+                        `Remove ${m.nickname}?`,
+                        "They will be removed from the circle and will need to rejoin with the invite code.",
+                        [
+                          { text: "Cancel", style: "cancel" },
+                          {
+                            text: "Remove",
+                            style: "destructive",
+                            onPress: () => removeMember(circle.id, m.userId),
+                          },
+                        ]
+                      )
+                    }
+                    style={[styles.removeMemberBtn, { backgroundColor: colors.destructive + "15", borderRadius: 8 }]}
+                  >
+                    <Feather name="user-minus" size={14} color={colors.destructive} />
+                  </Pressable>
+                ) : null}
               </View>
             ))}
 
@@ -1434,6 +1649,29 @@ export default function CircleDetailScreen() {
               </Pressable>
             )}
 
+            {/* Delete circle — creator only */}
+            {isCreator && (
+              <View style={[styles.deleteSection, { borderTopColor: colors.border }]}>
+                {!circle.deleteInitiatedAt ? (
+                  <Pressable
+                    onPress={handleInitiateDelete}
+                    style={[styles.deleteBtn, { borderColor: colors.destructive + "50", borderRadius: colors.radius - 4 }]}
+                  >
+                    <Feather name="trash-2" size={15} color={colors.destructive} />
+                    <Text style={[styles.deleteBtnText, { color: colors.destructive }]}>Delete Circle…</Text>
+                  </Pressable>
+                ) : (
+                  <Pressable
+                    onPress={() => cancelDeleteVote(circle.id)}
+                    style={[styles.deleteBtn, { borderColor: colors.mutedForeground + "40", borderRadius: colors.radius - 4 }]}
+                  >
+                    <Feather name="x-circle" size={15} color={colors.mutedForeground} />
+                    <Text style={[styles.deleteBtnText, { color: colors.mutedForeground }]}>Cancel Deletion Vote</Text>
+                  </Pressable>
+                )}
+              </View>
+            )}
+
             <Button
               label="Leave Circle"
               onPress={handleLeave}
@@ -1443,6 +1681,71 @@ export default function CircleDetailScreen() {
           </View>
         )}
       </ScrollView>
+
+      {/* ── Edit Circle Modal ────────────────────────────────────────── */}
+      <Modal
+        visible={showEditCircle}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => setShowEditCircle(false)}
+      >
+        <KeyboardAvoidingView
+          style={{ flex: 1, backgroundColor: colors.background }}
+          behavior={Platform.OS === "ios" ? "padding" : "height"}
+        >
+          <View style={[styles.editModalHeader, { borderBottomColor: colors.border, paddingTop: insets.top + 12 }]}>
+            <Pressable onPress={() => setShowEditCircle(false)}>
+              <Text style={[styles.editModalCancel, { color: colors.mutedForeground }]}>Cancel</Text>
+            </Pressable>
+            <Text style={[styles.editModalTitle, { color: colors.foreground }]}>Edit Circle</Text>
+            <Pressable onPress={handleSaveCircleEdit} disabled={!editCircleName.trim() || savingCircleEdit}>
+              <Text style={[styles.editModalSave, { color: !editCircleName.trim() || savingCircleEdit ? colors.mutedForeground : colors.primary }]}>
+                {savingCircleEdit ? "Saving…" : "Save"}
+              </Text>
+            </Pressable>
+          </View>
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 20, gap: 16 }}>
+            <Input
+              label="Circle Name"
+              value={editCircleName}
+              onChangeText={setEditCircleName}
+              placeholder="Weekend trip name..."
+            />
+            <Input
+              label="Destination"
+              value={editCircleDestination}
+              onChangeText={setEditCircleDestination}
+              placeholder="Where are you going?"
+            />
+            <Input
+              label="Description"
+              value={editCircleDescription}
+              onChangeText={setEditCircleDescription}
+              placeholder="What's this trip about?"
+            />
+            <View style={styles.dateRow}>
+              <View style={{ flex: 1 }}>
+                <Input
+                  label="Start Date"
+                  value={editCircleStartDate}
+                  onChangeText={setEditCircleStartDate}
+                  placeholder="MM/DD/YYYY"
+                  keyboardType="numbers-and-punctuation"
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Input
+                  label="End Date"
+                  value={editCircleEndDate}
+                  onChangeText={setEditCircleEndDate}
+                  placeholder="MM/DD/YYYY"
+                  keyboardType="numbers-and-punctuation"
+                />
+              </View>
+            </View>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </Modal>
     </KeyboardAvoidingView>
   );
 }
@@ -1546,6 +1849,14 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: "rgba(255,255,255,0.5)",
   },
+  budgetTotalPressable: { flexDirection: "row", alignItems: "center" },
+  budgetEditRow: { flexDirection: "row", alignItems: "center", gap: 8, flex: 1, justifyContent: "flex-end" },
+  budgetEditInput: { width: 90, height: 34, fontSize: 13 },
+  budgetEditSave: { width: 30, height: 30, borderRadius: 15, alignItems: "center", justifyContent: "center" },
+  setBudgetBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, padding: 14, borderWidth: 1.5, borderStyle: "dashed" as any, marginBottom: 12 },
+  setBudgetText: { fontFamily: "Inter_600SemiBold", fontSize: 14 },
+  setBudgetCard: { padding: 14, borderWidth: 1, gap: 10, marginBottom: 12 },
+  setBudgetCardLabel: { fontFamily: "Inter_600SemiBold", fontSize: 14 },
   budgetRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1718,4 +2029,30 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   catChipText: { fontFamily: "Inter_500Medium", fontSize: 12 },
+  removeMemberBtn: { width: 34, height: 34, alignItems: "center", justifyContent: "center" },
+  deleteSection: { borderTopWidth: 1, paddingTop: 16, marginTop: 8 },
+  deleteBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, padding: 14, borderWidth: 1 },
+  deleteBtnText: { fontFamily: "Inter_600SemiBold", fontSize: 14 },
+  voteBanner: { margin: 12, marginBottom: 0, padding: 14, borderWidth: 1, borderRadius: 12, gap: 10 },
+  voteBannerTop: { flexDirection: "row", alignItems: "center", gap: 8 },
+  voteBannerTitle: { fontFamily: "Inter_700Bold", fontSize: 14 },
+  voteBannerSub: { fontFamily: "Inter_400Regular", fontSize: 13 },
+  voteBannerBtn: { padding: 12, borderRadius: 10, alignItems: "center" },
+  voteBannerBtnText: { fontFamily: "Inter_700Bold", fontSize: 14, color: "#fff" },
+  voteButtons: { flexDirection: "row", gap: 10 },
+  voteBtn: { flex: 1, padding: 12, borderRadius: 10, alignItems: "center", borderWidth: 1 },
+  voteBtnText: { fontFamily: "Inter_600SemiBold", fontSize: 14 },
+  votedLabel: { fontFamily: "Inter_400Regular", fontSize: 13 },
+  dateRow: { flexDirection: "row", gap: 12 },
+  editModalHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 20,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+  },
+  editModalCancel: { fontFamily: "Inter_400Regular", fontSize: 16 },
+  editModalTitle: { fontFamily: "Inter_700Bold", fontSize: 17 },
+  editModalSave: { fontFamily: "Inter_600SemiBold", fontSize: 16 },
 });

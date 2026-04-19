@@ -13,39 +13,11 @@ import * as ImagePicker from "expo-image-picker";
 import { Input } from "@/components/ui/Input";
 import { useApp } from "@/context/AppContext";
 import { useColors } from "@/hooks/useColors";
+import { isValidTime, activityDate } from "@/lib/dateUtils";
+import { supabase } from "@/lib/supabase";
 
 function uid() {
   return Date.now().toString() + Math.random().toString(36).substr(2, 6);
-}
-
-function isValidTime(t: string): boolean {
-  return /^(0?[1-9]|1[0-2]):\d{2}\s?(AM|PM)$/i.test(t.trim());
-}
-
-function isValidDate(d: string): boolean {
-  if (!/^\d{2}\/\d{2}\/\d{4}$/.test(d.trim())) return false;
-  const [m, day, y] = d.split("/").map(Number);
-  const dt = new Date(y, m - 1, day);
-  return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === day;
-}
-
-function activityDate(startDateStr: string, dayNum: number, timeStr: string): Date {
-  const fallback = new Date();
-  if (!startDateStr || !isValidDate(startDateStr)) return fallback;
-  const [m, d, y] = startDateStr.split("/").map(Number);
-  const base = new Date(y, m - 1, d + (dayNum - 1));
-  if (timeStr && isValidTime(timeStr)) {
-    const match = timeStr.trim().match(/^(\d{1,2}):(\d{2})\s?(AM|PM)$/i);
-    if (match) {
-      let hours = parseInt(match[1]);
-      const mins = parseInt(match[2]);
-      const ampm = match[3].toUpperCase();
-      if (ampm === "PM" && hours < 12) hours += 12;
-      if (ampm === "AM" && hours === 12) hours = 0;
-      base.setHours(hours, mins, 0, 0);
-    }
-  }
-  return base;
 }
 
 interface Props {
@@ -61,7 +33,8 @@ export function TimelineComposer({ circleId, circleStartDate, isOpen, onClose }:
 
   const [composerType, setComposerType] = useState<"post" | "event">("post");
   const [caption, setCaption] = useState("");
-  const [images, setImages] = useState<string[]>([]);
+  const [images, setImages] = useState<{ uri: string; base64?: string | null }[]>([]);
+  const [uploading, setUploading] = useState(false);
   const [day, setDay] = useState("");
   const [eventTime, setEventTime] = useState("");
   const [eventLabel, setEventLabel] = useState("");
@@ -69,19 +42,59 @@ export function TimelineComposer({ circleId, circleStartDate, isOpen, onClose }:
   if (!isOpen) return null;
 
   const pickImage = async () => {
-    const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ["images"],
-      allowsMultipleSelection: true,
-      quality: 0.8,
-    });
+    let res;
+    try {
+      res = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsMultipleSelection: true,
+        quality: 0.7,
+        base64: true,
+      });
+    } catch {
+      return;
+    }
     if (!res.canceled)
-      setImages((prev) => [...prev, ...res.assets.map((a) => a.uri)]);
+      setImages((prev) => [
+        ...prev,
+        ...res.assets.map((a) => ({ uri: a.uri, base64: a.base64 })),
+      ]);
+  };
+
+  const uploadImages = async (imgs: { uri: string; base64?: string | null }[]): Promise<string[]> => {
+    const publicUrls: string[] = [];
+    for (const img of imgs) {
+      try {
+        const ext = (img.uri.split(".").pop()?.split("?")[0] ?? "jpg").toLowerCase();
+        const path = `${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+
+        // Decode base64 → Uint8Array (works reliably in React Native)
+        const binary = atob(img.base64 ?? "");
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+
+        const { error } = await supabase.storage
+          .from("trip-images")
+          .upload(path, bytes, { contentType: `image/${ext}` });
+        if (!error) {
+          const { data } = supabase.storage.from("trip-images").getPublicUrl(path);
+          publicUrls.push(data.publicUrl);
+        }
+      } catch (_) {
+        // skip failed uploads silently
+      }
+    }
+    return publicUrls;
   };
 
   const submitEntry = async () => {
     if (!caption.trim() && images.length === 0 && composerType === "post") return;
     if (composerType === "event" && !caption.trim() && !eventLabel.trim()) return;
     if (!currentUser) return;
+
+    setUploading(true);
+    const uploadedUrls = images.length > 0 ? await uploadImages(images) : [];
+
+    setUploading(false);
 
     const label =
       eventLabel.trim() ||
@@ -103,7 +116,7 @@ export function TimelineComposer({ circleId, circleStartDate, isOpen, onClose }:
       eventTime: eventTime.trim() || undefined,
       eventLabel: label || undefined,
       caption: caption.trim(),
-      images,
+      images: uploadedUrls,
       reactions: [],
       comments: [],
       createdAt: eventAt.toISOString(),
@@ -204,9 +217,9 @@ export function TimelineComposer({ circleId, circleStartDate, isOpen, onClose }:
 
       {images.length > 0 && (
         <View style={styles.imagePreviewRow}>
-          {images.map((uri, i) => (
+          {images.map((img, i) => (
             <View key={i} style={styles.imagePreviewWrap}>
-              <Image source={{ uri }} style={[styles.imagePreview, { borderRadius: 8 }]} />
+              <Image source={{ uri: img.uri }} style={[styles.imagePreview, { borderRadius: 8 }]} />
               <Pressable
                 onPress={() => setImages((prev) => prev.filter((_, idx) => idx !== i))}
                 style={[styles.removeImg, { backgroundColor: colors.destructive }]}
@@ -224,22 +237,19 @@ export function TimelineComposer({ circleId, circleStartDate, isOpen, onClose }:
         </Pressable>
         <Pressable
           onPress={submitEntry}
-          disabled={!caption.trim() && images.length === 0}
-          style={[
-            styles.postBtn,
-            {
-              backgroundColor: !caption.trim() && images.length === 0 ? colors.muted : colors.primary,
-              borderRadius: 18,
-            },
-          ]}
+          disabled={uploading || (!caption.trim() && images.length === 0)}
+          style={[styles.postBtn, {
+            backgroundColor: uploading || (!caption.trim() && images.length === 0)
+              ? colors.muted : colors.primary,
+            borderRadius: 18,
+          }]}
         >
-          <Text
-            style={[
-              styles.postBtnText,
-              { color: !caption.trim() && images.length === 0 ? colors.mutedForeground : "#fff" },
-            ]}
+          <Text style={[styles.postBtnText, {
+            color: uploading || (!caption.trim() && images.length === 0)
+              ? colors.mutedForeground : "#fff",
+          }]}
           >
-            Post
+            {uploading ? "Uploading..." : "Post"}
           </Text>
         </Pressable>
       </View>

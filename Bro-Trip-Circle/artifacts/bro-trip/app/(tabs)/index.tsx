@@ -1,7 +1,10 @@
 import { Feather } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
-import React from "react";
+import * as Haptics from "expo-haptics";
+import * as ImagePicker from "expo-image-picker";
+import React, { useState } from "react";
 import {
+  ActivityIndicator,
   FlatList,
   ImageBackground,
   Platform,
@@ -13,6 +16,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useApp, Circle } from "@/context/AppContext";
 import { useColors } from "@/hooks/useColors";
+import { supabase } from "@/lib/supabase";
 
 function getDaysUntil(dateStr: string): string {
   if (!dateStr) return "";
@@ -38,8 +42,12 @@ const COVERS = [
 function CircleCard({ circle }: { circle: Circle }) {
   const colors = useColors();
   const router = useRouter();
+  const { currentUser, updateCircle } = useApp();
+  const [uploading, setUploading] = useState(false);
+
   const totalSpent = circle.budget.reduce((s, b) => s + b.amount, 0);
   const budgetPct = circle.totalBudget > 0 ? Math.min(totalSpent / circle.totalBudget, 1) : 0;
+  const isCreator = circle.createdBy === currentUser?.id;
 
   const statusColor =
     circle.status === "active"
@@ -48,7 +56,38 @@ function CircleCard({ circle }: { circle: Circle }) {
         ? colors.primary
         : colors.mutedForeground;
 
-  const cover = COVERS[circle.id.charCodeAt(0) % COVERS.length];
+  const fallbackCover = COVERS[circle.id.charCodeAt(0) % COVERS.length];
+  const coverSource = circle.coverImage ? { uri: circle.coverImage } : fallbackCover;
+
+  const handleChangeCover = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== "granted") return;
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsEditing: true,
+      aspect: [16, 9],
+      quality: 0.8,
+      base64: true,
+    });
+    if (result.canceled || !result.assets[0].base64) return;
+
+    setUploading(true);
+    try {
+      const asset = result.assets[0];
+      const bytes = Uint8Array.from(atob(asset.base64!), (c) => c.charCodeAt(0));
+      const ext = asset.uri.split(".").pop()?.toLowerCase() || "jpg";
+      const path = `covers/${circle.id}-${Date.now()}.${ext}`;
+      const { error } = await supabase.storage.from("trip-images").upload(path, bytes, { contentType: `image/${ext}`, upsert: true });
+      if (error) throw error;
+      const { data: { publicUrl } } = supabase.storage.from("trip-images").getPublicUrl(path);
+      await updateCircle(circle.id, { coverImage: publicUrl });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } catch (e) {
+      console.warn("[cover upload]", e);
+    } finally {
+      setUploading(false);
+    }
+  };
 
   return (
     <Pressable
@@ -68,7 +107,7 @@ function CircleCard({ circle }: { circle: Circle }) {
       ]}
     >
       <ImageBackground
-        source={cover}
+        source={coverSource}
         style={styles.cover}
         imageStyle={{ borderTopLeftRadius: colors.radius, borderTopRightRadius: colors.radius }}
       >
@@ -79,9 +118,23 @@ function CircleCard({ circle }: { circle: Circle }) {
               {circle.status === "active" ? "In Progress" : circle.status === "upcoming" ? getDaysUntil(circle.startDate) : "Completed"}
             </Text>
           </View>
-          <View style={[styles.memberBadge, { backgroundColor: "rgba(0,0,0,0.5)" }]}>
-            <Feather name="users" size={12} color="rgba(255,255,255,0.8)" />
-            <Text style={styles.memberBadgeText}>{circle.members.length}</Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            {isCreator && (
+              <Pressable
+                onPress={handleChangeCover}
+                style={[styles.memberBadge, { backgroundColor: "rgba(0,0,0,0.5)" }]}
+                disabled={uploading}
+              >
+                {uploading
+                  ? <ActivityIndicator size={12} color="#fff" />
+                  : <Feather name="camera" size={12} color="rgba(255,255,255,0.9)" />
+                }
+              </Pressable>
+            )}
+            <View style={[styles.memberBadge, { backgroundColor: "rgba(0,0,0,0.5)" }]}>
+              <Feather name="users" size={12} color="rgba(255,255,255,0.8)" />
+              <Text style={styles.memberBadgeText}>{circle.members.length}</Text>
+            </View>
           </View>
         </View>
       </ImageBackground>

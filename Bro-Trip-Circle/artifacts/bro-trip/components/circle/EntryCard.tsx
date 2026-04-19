@@ -1,8 +1,11 @@
 import { Feather } from "@expo/vector-icons";
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import {
   Alert,
+  Dimensions,
+  FlatList,
   Image,
+  Modal,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -10,24 +13,19 @@ import {
   TextInput,
   View,
 } from "react-native";
+
+const SCREEN = Dimensions.get("window");
 import * as Haptics from "expo-haptics";
+import * as FileSystem from "expo-file-system/legacy";
+import * as MediaLibrary from "expo-media-library";
 import { useApp, type TimelineEntry } from "@/context/AppContext";
 import { useColors } from "@/hooks/useColors";
+import { timeAgo } from "@/lib/dateUtils";
 
 const REACTIONS = ["🔥", "😂", "❤️", "🤙", "💀", "🙌"];
 
 function uid() {
   return Date.now().toString() + Math.random().toString(36).substr(2, 6);
-}
-
-function timeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
-  const min = Math.floor(diff / 60000);
-  if (min < 1) return "just now";
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  return `${Math.floor(hr / 24)}d ago`;
 }
 
 interface Props {
@@ -44,6 +42,8 @@ export function EntryCard({ entry, circleId, memberNickname }: Props) {
   const [commentText, setCommentText] = useState("");
   const [isEditing, setIsEditing] = useState(false);
   const [editCaption, setEditCaption] = useState(entry.caption);
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const lightboxRef = useRef<FlatList>(null);
 
   const myReaction = entry.reactions.find((r) => r.userId === currentUser?.id);
   const reactionCounts: Record<string, number> = {};
@@ -68,6 +68,26 @@ export function EntryCard({ entry, circleId, memberNickname }: Props) {
     });
     setCommentText("");
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  };
+
+  const handleSaveImage = async (url: string) => {
+    const { status } = await MediaLibrary.requestPermissionsAsync();
+    if (status !== "granted") {
+      Alert.alert("Permission needed", "Allow photo library access to save images.");
+      return;
+    }
+    try {
+      // cacheDirectory is preferred; documentDirectory is the fallback
+      const dir = FileSystem.cacheDirectory || FileSystem.documentDirectory;
+      const localUri = `${dir}bro-trip-${Date.now()}.jpg`;
+      const result = await FileSystem.downloadAsync(url, localUri);
+      if (result.status !== 200) throw new Error(`HTTP ${result.status}`);
+      await MediaLibrary.saveToLibraryAsync(result.uri);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      Alert.alert("Saved", "Image saved to your photos.");
+    } catch (e: any) {
+      Alert.alert("Could not save", e?.message ?? String(e));
+    }
   };
 
   const handleSaveEdit = () => {
@@ -161,14 +181,78 @@ export function EntryCard({ entry, circleId, memberNickname }: Props) {
       {entry.images.length > 0 && (
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.imageRow}>
           {entry.images.map((uri, i) => (
-            <Image
-              key={i}
-              source={{ uri }}
-              style={[styles.entryImage, { borderRadius: colors.radius - 8 }]}
-            />
+            <Pressable key={i} onPress={() => setLightboxIndex(i)}>
+              <View style={styles.imageWrap}>
+                <Image
+                  source={{ uri }}
+                  style={[styles.entryImage, { borderRadius: colors.radius - 8 }]}
+                />
+                <View style={[styles.downloadBtn, { backgroundColor: "rgba(0,0,0,0.45)" }]}>
+                  <Feather name="maximize-2" size={13} color="#fff" />
+                </View>
+              </View>
+            </Pressable>
           ))}
         </ScrollView>
       )}
+
+      {/* Full-screen lightbox */}
+      <Modal
+        visible={lightboxIndex !== null}
+        transparent
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setLightboxIndex(null)}
+      >
+        <View style={styles.lightboxBg}>
+          <Pressable style={styles.lightboxClose} onPress={() => setLightboxIndex(null)}>
+            <Feather name="x" size={26} color="#fff" />
+          </Pressable>
+
+          <FlatList
+            ref={lightboxRef}
+            data={entry.images}
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            initialScrollIndex={lightboxIndex ?? 0}
+            getItemLayout={(_, index) => ({ length: SCREEN.width, offset: SCREEN.width * index, index })}
+            onLayout={() => {
+              if (lightboxIndex != null && lightboxIndex > 0) {
+                lightboxRef.current?.scrollToIndex({ index: lightboxIndex, animated: false });
+              }
+            }}
+            keyExtractor={(_, i) => String(i)}
+            renderItem={({ item: uri, index }) => (
+              <View style={styles.lightboxSlide}>
+                <Image
+                  source={{ uri }}
+                  style={styles.lightboxImage}
+                  resizeMode="contain"
+                />
+                <Pressable
+                  style={[styles.lightboxDownload, { backgroundColor: "rgba(0,0,0,0.55)" }]}
+                  onPress={() => handleSaveImage(uri)}
+                >
+                  <Feather name="download" size={18} color="#fff" />
+                  <Text style={styles.lightboxDownloadText}>Save</Text>
+                </Pressable>
+              </View>
+            )}
+          />
+
+          {entry.images.length > 1 && (
+            <View style={styles.lightboxDots}>
+              {entry.images.map((_, i) => (
+                <View
+                  key={i}
+                  style={[styles.dot, { backgroundColor: i === (lightboxIndex ?? 0) ? "#fff" : "rgba(255,255,255,0.35)" }]}
+                />
+              ))}
+            </View>
+          )}
+        </View>
+      </Modal>
 
       <View style={styles.entryActions}>
         <Pressable onPress={() => setShowReactions((v) => !v)} style={styles.actionBtn}>
@@ -255,7 +339,9 @@ const styles = StyleSheet.create({
   entryTime: { fontFamily: "Inter_400Regular", fontSize: 12, marginTop: 1 },
   entryCaption: { fontFamily: "Inter_400Regular", fontSize: 15, lineHeight: 22, paddingHorizontal: 14, paddingBottom: 10 },
   imageRow: { paddingHorizontal: 14, paddingBottom: 10 },
-  entryImage: { width: 200, height: 180, marginRight: 8 },
+  imageWrap: { position: "relative", marginRight: 8 },
+  entryImage: { width: 200, height: 180 },
+  downloadBtn: { position: "absolute", bottom: 8, right: 8, width: 30, height: 30, borderRadius: 15, alignItems: "center", justifyContent: "center" },
   entryActions: { flexDirection: "row", alignItems: "center", gap: 14, paddingHorizontal: 14, paddingBottom: 12 },
   actionBtn: { flexDirection: "row", alignItems: "center", gap: 5 },
   reactionEmoji: { fontSize: 20 },
@@ -271,4 +357,12 @@ const styles = StyleSheet.create({
   commentText: { fontFamily: "Inter_400Regular", fontSize: 14, lineHeight: 20 },
   commentInputRow: { flexDirection: "row", alignItems: "center", gap: 10, borderTopWidth: 1, paddingTop: 10 },
   commentField: { flex: 1, fontSize: 14 },
+  lightboxBg: { flex: 1, backgroundColor: "rgba(0,0,0,0.95)", justifyContent: "center" },
+  lightboxClose: { position: "absolute", top: 52, right: 20, zIndex: 10, padding: 8, backgroundColor: "rgba(255,255,255,0.15)", borderRadius: 20 },
+  lightboxSlide: { width: SCREEN.width, height: SCREEN.height, justifyContent: "center", alignItems: "center" },
+  lightboxImage: { width: SCREEN.width, height: SCREEN.height * 0.75 },
+  lightboxDownload: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 20, paddingHorizontal: 20, paddingVertical: 12, borderRadius: 24 },
+  lightboxDownloadText: { fontFamily: "Inter_600SemiBold", fontSize: 15, color: "#fff" },
+  lightboxDots: { position: "absolute", bottom: 48, left: 0, right: 0, flexDirection: "row", justifyContent: "center", gap: 6 },
+  dot: { width: 7, height: 7, borderRadius: 4 },
 });

@@ -22,6 +22,7 @@ import { useApp, Circle, VerificationQuestion } from "@/context/AppContext";
 import {
   RiskLevel,
   TIMER_SECONDS,
+  applyCooldownExpiry,
   applyCorrectAnswer,
   applyReentryCode,
   applyTimeout,
@@ -88,7 +89,7 @@ const RISK_LABEL: Record<RiskLevel, string> = {
 export default function JoinCircleScreen() {
   const colors = useColors();
   const router = useRouter();
-  const { currentUser, joinCircle, circles, requestJoin, addNotification } = useApp();
+  const { currentUser, joinCircle, circles, requestJoin, addNotification, findCircleByInviteCode } = useApp();
 
   const [step, setStep] = useState<Step>("code");
   const [inviteCode, setInviteCode] = useState("");
@@ -174,15 +175,17 @@ export default function JoinCircleScreen() {
 
   const findCircle = async () => {
     const code = inviteCode.trim().toUpperCase();
-    const local = circles.find((c) => c.inviteCode === code);
     const demo = DEMO_CIRCLES.find((c) => c.inviteCode === code);
-    const found = local || demo;
+    const remote = demo ? null : await findCircleByInviteCode(code);
+    const found = demo || remote;
     if (!found) { setCodeError("No circle found. Double-check the code."); return; }
     if (found.members.some((m) => m.userId === currentUser?.id)) { setCodeError("You're already in this circle."); return; }
     setCodeError("");
     setFoundCircle(found);
     if (!currentUser) return;
     let state = await loadRiskState(currentUser.id, found.id);
+    state = applyCooldownExpiry(state);
+    await saveRiskState(currentUser.id, found.id, state);
     if (isLocked(state)) {
       setStep("locked");
       if (state.lockedUntil) startLockTimer(state.lockedUntil);

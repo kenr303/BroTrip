@@ -14,9 +14,15 @@
       "backgroundColor": "#1A1A2E"
     },
     "ios": {
-      "supportsTablet": false
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSPhotoLibraryAddUsageDescription": "Bro Trip saves trip photos to your photo library.",
+        "NSPhotoLibraryUsageDescription": "Bro Trip accesses your photo library to pick and save trip photos."
+      }
     },
-    "android": {},
+    "android": {
+      "permissions": ["READ_MEDIA_IMAGES", "WRITE_EXTERNAL_STORAGE", "NOTIFICATIONS", "RECEIVE_BOOT_COMPLETED", "VIBRATE"]
+    },
     "web": {
       "favicon": "./assets/images/icon.png"
     },
@@ -24,7 +30,15 @@
       "expo-router",
       "expo-font",
       "expo-web-browser",
-      "expo-image-picker"
+      "expo-image-picker",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/icon.png",
+          "color": "#4F46E5",
+          "sounds": []
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

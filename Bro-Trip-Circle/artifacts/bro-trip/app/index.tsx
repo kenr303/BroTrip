@@ -1,58 +1,43 @@
 import { useRouter } from "expo-router";
-import React, { useEffect, useState } from "react";
-import { ActivityIndicator, View, Text, TextInput, Button } from "react-native";;
+import React, { useEffect, useRef, useState } from "react";
+import { ActivityIndicator, Text, View } from "react-native";
 import { useApp } from "@/context/AppContext";
 import { useColors } from "@/hooks/useColors";
-import { supabase } from "../lib/supabase";
+
+const LOADING_NOTES = [
+  "珍惜生命 远离毒品",
+  "喝酒不开车，开车不喝酒",
+  "道路千万条，安全第一条",
+  "天上掉馅饼，地下有陷阱",
+  "劝君莫打鸟，子在巢中望母归",
+  "今天偷税漏税，明天牢里排队",
+  "所有的礼物，都在暗中标好了价格",
+  "你可以低头，但不能跪下",
+  "当你在凝视深渊时，深渊也在凝视着你",
+  "别太把自己当回事，这世界离了谁都转得动",
+];
 
 export default function RootIndex() {
   const { currentUser, isLoading } = useApp();
   const router = useRouter();
   const colors = useColors();
+  const [canNavigate, setCanNavigate] = useState(false);
+  const noteRef = useRef(LOADING_NOTES[Math.floor(Math.random() * LOADING_NOTES.length)]);
 
-  const [notes, setNotes] = useState<any[]>([]);
-  const [newNote, setNewNote] = useState("");
-
-  const fetchNotes = async () => {
-    const { data, error } = await supabase.from("notes").select("*");
-
-    if (error) {
-      console.log("Supabase error:", error);
-    } else {
-      console.log("Supabase notes:", data);
-      setNotes(data ?? []);
-    }
-  };
-
-  const addNote = async () => {
-    if (!newNote.trim()) return;
-
-    const { error } = await supabase.from("notes").insert([
-      {
-        content: newNote,
-      },
-    ]);
-
-    if (error) {
-      console.log("Insert error:", error);
-    } else {
-      setNewNote("");
-      fetchNotes();
-    }
-  };
-
+  // Minimum 1 second on screen so the note is readable
   useEffect(() => {
-    fetchNotes();
+    const t = setTimeout(() => setCanNavigate(true), 2000);
+    return () => clearTimeout(t);
   }, []);
 
   useEffect(() => {
-    if (isLoading) return;
+    if (isLoading || !canNavigate) return;
     if (!currentUser) {
-      // router.replace("/welcome");
+      router.replace("/welcome");
     } else {
-      //router.replace("/(tabs)/");
+      router.replace("/(tabs)/");
     }
-  }, [isLoading, currentUser]);
+  }, [isLoading, canNavigate, currentUser]);
 
   return (
     <View
@@ -61,35 +46,22 @@ export default function RootIndex() {
         alignItems: "center",
         justifyContent: "center",
         backgroundColor: colors.background,
-        padding: 20,
+        gap: 20,
+        paddingHorizontal: 40,
       }}
     >
       <ActivityIndicator color={colors.primary} size="large" />
-
-      <TextInput
-        value={newNote}
-        onChangeText={setNewNote}
-        placeholder="Type a new note"
+      <Text
         style={{
-          borderWidth: 1,
-          borderColor: "gray",
-          width: "80%",
-          padding: 10,
-          marginBottom: 12,
-          backgroundColor: "white",
+          color: colors.mutedForeground,
+          fontFamily: "Inter_400Regular",
+          fontSize: 14,
+          textAlign: "center",
+          lineHeight: 22,
         }}
-      />
-
-      <Button title="Add Note" onPress={addNote} />
-
-      {notes.map((note) => (
-        <Text
-          key={note.id}
-          style={{ color: "black", marginTop: 12, fontSize: 16 }}
-        >
-          {note.content}
-        </Text>
-      ))}
+      >
+        {noteRef.current}
+      </Text>
     </View>
   );
 }

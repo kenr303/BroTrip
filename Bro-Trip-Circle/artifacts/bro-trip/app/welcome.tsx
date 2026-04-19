@@ -18,33 +18,55 @@ import { Input } from "@/components/ui/Input";
 import { useApp } from "@/context/AppContext";
 import { useColors } from "@/hooks/useColors";
 
-const AVATARS = ["🏄", "🧗", "🏕️", "🚵", "🏔️", "🤿", "🪂", "🎿"];
+type Mode = "signin" | "signup";
 
 export default function WelcomeScreen() {
   const colors = useColors();
   const router = useRouter();
-  const { setCurrentUser } = useApp();
+  const { signIn, signUp } = useApp();
+
+  const [mode, setMode] = useState<Mode>("signin");
   const [name, setName] = useState("");
-  const [nameError, setNameError] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const handleContinue = async () => {
-    if (!name.trim()) {
-      setNameError("Enter your name to continue");
+  const switchMode = (m: Mode) => {
+    setMode(m);
+    setError("");
+  };
+
+  const handleSubmit = async () => {
+    setError("");
+    if (mode === "signup" && !name.trim()) {
+      setError("Enter your name");
       return;
     }
-    setNameError("");
+    if (!email.trim()) {
+      setError("Enter your email");
+      return;
+    }
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters");
+      return;
+    }
+
     setLoading(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    const id = Date.now().toString() + Math.random().toString(36).substr(2, 6);
-    await setCurrentUser({
-      id,
-      name: name.trim(),
-      avatar: AVATARS[Math.floor(Math.random() * AVATARS.length)],
-      joinedAt: new Date().toISOString(),
-    });
+
+    const err =
+      mode === "signin"
+        ? await signIn(email.trim(), password)
+        : await signUp(email.trim(), password, name.trim());
+
     setLoading(false);
-    router.replace("/(tabs)/");
+
+    if (err) {
+      setError(err);
+    } else {
+      router.replace("/(tabs)/");
+    }
   };
 
   return (
@@ -70,24 +92,72 @@ export default function WelcomeScreen() {
           </View>
 
           <View style={[styles.card, { backgroundColor: colors.card, borderRadius: colors.radius }]}>
-            <Text style={[styles.cardTitle, { color: colors.foreground }]}>
-              What do your bros call you?
-            </Text>
+            {/* Tab switcher */}
+            <View style={[styles.tabs, { backgroundColor: colors.muted, borderRadius: 10 }]}>
+              {(["signin", "signup"] as Mode[]).map((m) => (
+                <Pressable
+                  key={m}
+                  onPress={() => switchMode(m)}
+                  style={[
+                    styles.tab,
+                    mode === m && { backgroundColor: colors.card, borderRadius: 8 },
+                  ]}
+                >
+                  <Text style={[
+                    styles.tabText,
+                    { color: mode === m ? colors.foreground : colors.mutedForeground },
+                  ]}>
+                    {m === "signin" ? "Sign In" : "Create Account"}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+
+            {mode === "signup" && (
+              <Input
+                label="Name"
+                placeholder="What do your bros call you?"
+                value={name}
+                onChangeText={setName}
+                autoCapitalize="words"
+                autoFocus={mode === "signup"}
+                returnKeyType="next"
+              />
+            )}
+
             <Input
-              placeholder="Your name"
-              value={name}
-              onChangeText={setName}
-              error={nameError}
-              autoCapitalize="words"
-              autoFocus
-              returnKeyType="done"
-              onSubmitEditing={handleContinue}
+              label="Email"
+              placeholder="you@example.com"
+              value={email}
+              onChangeText={setEmail}
+              autoCapitalize="none"
+              keyboardType="email-address"
+              autoFocus={mode === "signin"}
+              returnKeyType="next"
             />
+
+            <Input
+              label="Password"
+              placeholder="••••••••"
+              value={password}
+              onChangeText={setPassword}
+              secureTextEntry
+              returnKeyType="done"
+              onSubmitEditing={handleSubmit}
+            />
+
+            {!!error && (
+              <View style={[styles.errorBox, { backgroundColor: colors.destructive + "18", borderRadius: 8 }]}>
+                <Feather name="alert-circle" size={14} color={colors.destructive} />
+                <Text style={[styles.errorText, { color: colors.destructive }]}>{error}</Text>
+              </View>
+            )}
+
             <Button
-              label="Let's Go"
-              onPress={handleContinue}
+              label={mode === "signin" ? "Sign In" : "Create Account"}
+              onPress={handleSubmit}
               loading={loading}
-              disabled={!name.trim()}
+              disabled={!email.trim() || password.length < 6 || (mode === "signup" && !name.trim())}
             />
           </View>
 
@@ -134,12 +204,12 @@ const styles = StyleSheet.create({
     fontFamily: "Inter_400Regular",
     lineHeight: 26,
   },
-  card: { padding: 24, gap: 20 },
-  cardTitle: {
-    fontSize: 22,
-    fontFamily: "Inter_700Bold",
-    lineHeight: 28,
-  },
+  card: { padding: 24, gap: 16 },
+  tabs: { flexDirection: "row", padding: 4, gap: 4 },
+  tab: { flex: 1, paddingVertical: 8, alignItems: "center" },
+  tabText: { fontFamily: "Inter_600SemiBold", fontSize: 14 },
+  errorBox: { flexDirection: "row", alignItems: "center", gap: 8, padding: 10 },
+  errorText: { fontFamily: "Inter_400Regular", fontSize: 13, flex: 1 },
   featureList: { gap: 16 },
   featureItem: { flexDirection: "row", alignItems: "center", gap: 14 },
   featureIcon: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
