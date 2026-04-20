@@ -515,6 +515,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       .on("postgres_changes", { event: "*", schema: "public", table: "itinerary_items" }, handle)
       .on("postgres_changes", { event: "*", schema: "public", table: "budget_items" }, handle)
       .on("postgres_changes", { event: "*", schema: "public", table: "circle_delete_responses" }, handle)
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "circles" }, (p) => refreshCircle(p.new.id))
       .subscribe((status) => {
         if (__DEV__) console.log("[realtime] channel status:", status);
       });
@@ -721,12 +722,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const initiateDeleteVote = useCallback(async (circleId: string) => {
     if (!currentUser) return;
     const now = new Date().toISOString();
+    // Always wipe stale responses first so previous votes don't carry over
+    await supabase.from("circle_delete_responses").delete().eq("circle_id", circleId);
     await supabase.from("circles").update({
       delete_initiated_at: now,
       delete_initiated_by: currentUser.id,
     }).eq("id", circleId);
+    // Creator's vote is implicitly yes — record it immediately
+    await supabase.from("circle_delete_responses").insert(
+      { circle_id: circleId, user_id: currentUser.id, vote: "yes", voted_at: now }
+    );
+    const creatorVote: DeleteVoteResponse = { userId: currentUser.id, vote: "yes", votedAt: now };
     setCircles((prev) => prev.map((c) => c.id !== circleId ? c : {
-      ...c, deleteInitiatedAt: now, deleteInitiatedBy: currentUser.id, deleteResponses: [],
+      ...c, deleteInitiatedAt: now, deleteInitiatedBy: currentUser.id, deleteResponses: [creatorVote],
     }));
     const circle = circles.find((c) => c.id === circleId);
     const otherIds = (circle?.members ?? []).map((m) => m.userId).filter((id) => id !== currentUser.id);

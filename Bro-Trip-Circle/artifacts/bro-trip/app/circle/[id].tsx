@@ -198,6 +198,53 @@ export default function CircleDetailScreen() {
   const deleteApproved = effectiveYes > circle.members.length * 0.5;
   const myVote = deleteResponses.find((r) => r.userId === currentUser?.id)?.vote ?? null;
 
+  const DeleteVoteBanner = ({ inMembersTab = false }: { inMembersTab?: boolean }) => (
+    <View style={[
+      styles.voteBanner,
+      { backgroundColor: colors.destructive + "18", borderColor: colors.destructive + "40" },
+      inMembersTab && { marginHorizontal: 0, marginTop: 0, marginBottom: 12 },
+    ]}>
+      <View style={styles.voteBannerTop}>
+        <Feather name="alert-triangle" size={15} color={colors.destructive} />
+        <Text style={[styles.voteBannerTitle, { color: colors.destructive }]}>
+          Deletion Vote In Progress
+        </Text>
+      </View>
+      <Text style={[styles.voteBannerSub, { color: colors.mutedForeground }]}>
+        {deleteApproved
+          ? "Vote passed — circle can now be deleted."
+          : `${effectiveYes} of ${circle.members.length} yes · Deadline: ${deleteDeadline?.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`}
+      </Text>
+      {deleteApproved && isCreator ? (
+        <Pressable onPress={handleDeleteApproved} style={[styles.voteBannerBtn, { backgroundColor: colors.destructive }]}>
+          <Text style={styles.voteBannerBtnText}>Delete Circle Forever</Text>
+        </Pressable>
+      ) : !myVote && !isCreator ? (
+        <View style={styles.voteButtons}>
+          <Pressable
+            onPress={() => castDeleteVote(circle.id, "yes")}
+            style={[styles.voteBtn, { backgroundColor: colors.destructive + "20", borderColor: colors.destructive + "60" }]}
+          >
+            <Text style={[styles.voteBtnText, { color: colors.destructive }]}>Yes, Delete</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => castDeleteVote(circle.id, "no")}
+            style={[styles.voteBtn, { backgroundColor: colors.success + "20", borderColor: colors.success + "60" }]}
+          >
+            <Text style={[styles.voteBtnText, { color: colors.success }]}>No, Keep It</Text>
+          </Pressable>
+        </View>
+      ) : myVote ? (
+        <Text style={[styles.votedLabel, { color: colors.mutedForeground }]}>
+          You voted:{" "}
+          <Text style={{ color: myVote === "yes" ? colors.destructive : colors.success, fontFamily: "Inter_600SemiBold" }}>
+            {myVote === "yes" ? "Yes, delete" : "No, keep it"}
+          </Text>
+        </Text>
+      ) : null}
+    </View>
+  );
+
   const handleInitiateDelete = () => {
     Alert.alert(
       "Start Deletion Vote?",
@@ -759,56 +806,15 @@ export default function CircleDetailScreen() {
         ))}
       </View>
 
-      {/* ── Delete vote banner ───────────────────────────────────── */}
-      {circle.deleteInitiatedAt && (
-        <View style={[styles.voteBanner, { backgroundColor: colors.destructive + "18", borderColor: colors.destructive + "40" }]}>
-          <View style={styles.voteBannerTop}>
-            <Feather name="alert-triangle" size={15} color={colors.destructive} />
-            <Text style={[styles.voteBannerTitle, { color: colors.destructive }]}>
-              Deletion Vote In Progress
-            </Text>
-          </View>
-          <Text style={[styles.voteBannerSub, { color: colors.mutedForeground }]}>
-            {deleteApproved
-              ? "Vote passed — circle can now be deleted."
-              : `${effectiveYes} of ${circle.members.length} yes · Deadline: ${deleteDeadline?.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`}
-          </Text>
-          {deleteApproved && isCreator ? (
-            <Pressable
-              onPress={handleDeleteApproved}
-              style={[styles.voteBannerBtn, { backgroundColor: colors.destructive }]}
-            >
-              <Text style={styles.voteBannerBtnText}>Delete Circle Forever</Text>
-            </Pressable>
-          ) : !myVote && !isCreator ? (
-            <View style={styles.voteButtons}>
-              <Pressable
-                onPress={() => castDeleteVote(circle.id, "yes")}
-                style={[styles.voteBtn, { backgroundColor: colors.destructive + "20", borderColor: colors.destructive + "60" }]}
-              >
-                <Text style={[styles.voteBtnText, { color: colors.destructive }]}>Yes, Delete</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => castDeleteVote(circle.id, "no")}
-                style={[styles.voteBtn, { backgroundColor: colors.success + "20", borderColor: colors.success + "60" }]}
-              >
-                <Text style={[styles.voteBtnText, { color: colors.success }]}>No, Keep It</Text>
-              </Pressable>
-            </View>
-          ) : myVote ? (
-            <Text style={[styles.votedLabel, { color: colors.mutedForeground }]}>
-              You voted: <Text style={{ color: myVote === "yes" ? colors.destructive : colors.success, fontFamily: "Inter_600SemiBold" }}>{myVote === "yes" ? "Yes, delete" : "No, keep it"}</Text>
-            </Text>
-          ) : null}
-        </View>
-      )}
-
       <ScrollView
         contentContainerStyle={{
           paddingBottom:
             Platform.OS === "web" ? 80 : insets.bottom + 30,
         }}
       >
+        {/* ── Delete vote banner (always visible at top) ─────────── */}
+        {circle.deleteInitiatedAt && <DeleteVoteBanner />}
+
         {/* ── TIMELINE ──────────────────────────────────────────── */}
         {activeTab === "timeline" && (
           <View style={styles.section}>

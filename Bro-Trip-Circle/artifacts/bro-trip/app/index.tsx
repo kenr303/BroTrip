@@ -24,7 +24,7 @@ export default function RootIndex() {
   const [canNavigate, setCanNavigate] = useState(false);
   const noteRef = useRef(LOADING_NOTES[Math.floor(Math.random() * LOADING_NOTES.length)]);
 
-  // Minimum 1 second on screen so the note is readable
+  // Minimum 2 seconds on screen so the note is readable
   useEffect(() => {
     const t = setTimeout(() => setCanNavigate(true), 2000);
     return () => clearTimeout(t);
@@ -35,7 +35,7 @@ export default function RootIndex() {
     if (!currentUser) {
       router.replace("/welcome");
     } else {
-      router.replace("/(tabs)/");
+      router.replace("/(tabs)");
     }
   }, [isLoading, canNavigate, currentUser]);
 
